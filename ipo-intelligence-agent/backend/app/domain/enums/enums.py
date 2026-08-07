@@ -141,6 +141,7 @@ class AgentStatus(str, Enum):
     IDLE = "idle"
     RUNNING = "running"
     COMPLETED = "completed"
+    PARTIAL = "partial"
     FAILED = "failed"
     TIMEOUT = "timeout"
     RETRYING = "retrying"

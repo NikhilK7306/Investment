@@ -90,39 +90,46 @@ class SQLIPORepository(IPORepository):
         """Save IPO."""
         model = IPOModel(
             symbol=ipo.symbol,
+            company_id=ipo.company_id,
             company_name=ipo.company_name,
             exchange=ipo.exchange,
             sector=ipo.sector,
             industry=ipo.industry,
-            status=ipo.status,
+            status=self._to_status(ipo.status),
             announced_date=ipo.announced_date,
-            filed_date=ipo.filed_date,
-            pricing_date=ipo.pricing_date,
-            listed_date=ipo.listing_date,
+            filed_date=ipo.filing_date,
+            priced_date=ipo.pricing_date,
+            listed_date=ipo.listed_date,
+            withdrawn_date=ipo.withdrawn_date,
             expected_date=ipo.expected_date,
             expected_price_low=ipo.price_range.low.amount if ipo.price_range and ipo.price_range.low else None,
             expected_price_high=ipo.price_range.high.amount if ipo.price_range and ipo.price_range.high else None,
-            offer_price=ipo.offer_price.amount if ipo.offer_price else None,
+            priced_price=ipo.offer_price.amount if ipo.offer_price else None,
             shares_offered=ipo.shares_offered,
-            valuation=ipo.valuation.equity_value.amount if ipo.valuation else None,
-            use_of_proceeds=ipo.use_of_proceeds,
-            underwriters=ipo.underwriters,
-            lead_underwriter=ipo.lead_underwriter,
-            lockup_period_days=ipo.lockup_period_days,
+            overallotment_option=ipo.greenshoe_option,
+            overallotment_shares=ipo.greenshoe_shares,
+            lead_underwriters=[ipo.lead_underwriter] if ipo.lead_underwriter else list(ipo.underwriters),
             lockup_expiry=ipo.lockup_expiry,
-            greenshoe_option=ipo.greenshoe_option,
-            greenshoe_shares=ipo.greenshoe_shares,
-            minimum_investment=ipo.minimum_investment.amount if ipo.minimum_investment else None,
-            retail_allocation_pct=float(ipo.retail_allocation_pct.value) if ipo.retail_allocation_pct else None,
-            institutional_allocation_pct=float(ipo.institutional_allocation_pct.value) if ipo.institutional_allocation_pct else None,
-            employee_allocation_pct=float(ipo.employee_allocation_pct.value) if ipo.employee_allocation_pct else None,
-            expected_raise=ipo.expected_raise.amount if ipo.expected_raise else None,
-            registration_statement=ipo.registration_statement,
+            lockup_days=ipo.lockup_period_days,
             prospectus_url=ipo.prospectus_url,
-            sec_cik=ipo.sec_cik,
         )
         self.session.add(model)
         await self.session.flush()
+
+    @staticmethod
+    def _to_status(status) -> IPOStatus:
+        """Normalize IPO status string/enum to IPOStatus enum."""
+        if isinstance(status, IPOStatus):
+            return status
+        if not status:
+            return IPOStatus.ANNOUNCED
+        try:
+            return IPOStatus(str(status).lower())
+        except ValueError:
+            try:
+                return IPOStatus[str(status).upper()]
+            except KeyError:
+                return IPOStatus.ANNOUNCED
 
     async def delete(self, entity_id: UUID) -> bool:
         result = await self.session.execute(
@@ -165,7 +172,7 @@ class SQLIPORepository(IPORepository):
 
         conditions = []
         if status:
-            conditions.append(IPOModel.status == status)
+            conditions.append(IPOModel.status == self._to_status(status))
         if exchange:
             conditions.append(IPOModel.exchange == exchange)
         if sector:
@@ -195,7 +202,7 @@ class SQLIPORepository(IPORepository):
 
         conditions = []
         if status:
-            conditions.append(IPOModel.status == status)
+            conditions.append(IPOModel.status == self._to_status(status))
         if exchange:
             conditions.append(IPOModel.exchange == exchange)
         if sector:
@@ -251,7 +258,7 @@ class SQLIPORepository(IPORepository):
         )
         model = result.scalar_one_or_none()
         if model:
-            model.status = status
+            model.status = self._to_status(status)
             model.updated_at = datetime.utcnow()
             return True
         return False
@@ -259,49 +266,55 @@ class SQLIPORepository(IPORepository):
     def _to_entity(self, model: IPOModel) -> IPODetails:
         """Convert model to entity."""
         price_range = None
-        if model.expected_price_low and model.expected_price_high:
+        if model.expected_price_low is not None and model.expected_price_high is not None:
             price_range = PriceRange(
                 low=Money(model.expected_price_low, "USD"),
                 high=Money(model.expected_price_high, "USD"),
             )
+        elif model.expected_price_low is not None:
+            price_range = PriceRange(
+                low=Money(model.expected_price_low, "USD"),
+                high=Money(model.expected_price_low, "USD"),
+            )
+
+        offer_price = Money(model.priced_price, "USD") if model.priced_price is not None else None
 
         valuation = None
-        if model.valuation:
+        if model.priced_valuation is not None:
             valuation = Valuation(
-                enterprise_value=Money(model.valuation, "USD"),
-                equity_value=Money(model.valuation, "USD"),
-                price_per_share=Money(model.offer_price or 0, "USD"),
+                enterprise_value=Money(model.priced_valuation, "USD"),
+                equity_value=Money(model.priced_valuation, "USD"),
+                price_per_share=model.priced_price or 0,
                 shares_outstanding=model.shares_offered or 0,
             )
+
+        status = model.status.value if hasattr(model.status, 'value') else model.status
 
         return IPODetails(
             symbol=model.symbol,
             company_name=model.company_name,
             exchange=model.exchange,
+            sector=model.sector,
+            industry=model.industry,
             expected_date=model.expected_date,
+            announced_date=model.announced_date,
             filing_date=model.filed_date,
-            pricing_date=model.pricing_date,
+            pricing_date=model.priced_date,
             listed_date=model.listed_date,
-            status=model.status.value if hasattr(model.status, 'value') else model.status,
+            withdrawn_date=model.withdrawn_date,
+            status=status,
             shares_offered=model.shares_offered,
             price_range=price_range,
-            offer_price=Money(model.offer_price, "USD") if model.offer_price else None,
+            offer_price=offer_price,
             valuation=valuation,
-            use_of_proceeds=model.use_of_proceeds or "",
-            underwriters=model.underwriters or [],
-            lead_underwriter=model.lead_underwriter or "",
-            lockup_period_days=model.lockup_period_days,
+            underwriters=model.co_managers or [],
+            lead_underwriter=", ".join(model.lead_underwriters or [])[:255],
+            lockup_period_days=model.lockup_days,
             lockup_expiry=model.lockup_expiry,
-            greenshoe_option=model.greenshoe_option,
-            greenshoe_shares=model.greenshoe_shares,
-            minimum_investment=Money(model.minimum_investment, "USD") if model.minimum_investment else None,
-            retail_allocation_pct=Percentage.from_decimal(model.retail_allocation_pct) if model.retail_allocation_pct else None,
-            institutional_allocation_pct=Percentage.from_decimal(model.institutional_allocation_pct) if model.institutional_allocation_pct else None,
-            employee_allocation_pct=Percentage.from_decimal(model.employee_allocation_pct) if model.employee_allocation_pct else None,
-            expected_raise=Money(model.expected_raise, "USD") if model.expected_raise else None,
-            registration_statement=model.registration_statement or "",
+            greenshoe_option=model.overallotment_option,
+            greenshoe_shares=model.overallotment_shares,
             prospectus_url=model.prospectus_url or "",
-            sec_cik=model.sec_cik or "",
+            company_id=model.company_id,
         )
 
 
@@ -311,36 +324,29 @@ class SQLCompanyRepository(CompanyRepository):
     def __init__(self, session: AsyncSession):
         self.session = session
 
-    async def save(self, company: CompanyProfile) -> None:
-        """Save company profile."""
+    async def save(self, company: CompanyProfile) -> UUID:
+        """Save company profile and return its id."""
         model = CompanyModel(
             legal_name=company.legal_name,
             common_name=company.common_name,
-            ticker=company.ticker,
-            exchange=company.sector,  # Note: field name mismatch, using sector field
+            ticker=(company.ticker or company.common_name).upper(),
+            exchange=company.exchange,
             sector=company.sector,
             industry=company.industry,
             description=company.description,
             business_model=company.business_model,
+            competitive_advantage="; ".join(company.competitive_advantages or []),
             headquarters=company.headquarters,
-            founded_year=company.founded_year,
             employee_count=company.employee_count,
             website=company.website,
             ceo=company.ceo,
             cfo=company.cfo,
-            chairman=company.chairman,
             board_members=company.board_members,
             major_shareholders=company.major_shareholders,
-            competitors=company.competitors,
-            competitive_advantages=company.competitive_advantages,
-            risk_factors=company.risk_factors,
-            key_products=company.key_products,
-            target_markets=company.target_markets,
-            regulatory_environment=company.regulatory_environment,
-            esg_score=company.esg_score,
         )
         self.session.add(model)
         await self.session.flush()
+        return model.id
 
     async def get_by_symbol(self, symbol: str) -> Optional[CompanyProfile]:
         """Get company by symbol."""
@@ -349,6 +355,17 @@ class SQLCompanyRepository(CompanyRepository):
         )
         model = result.scalar_one_or_none()
         return self._to_entity(model) if model else None
+
+    async def delete(self, entity_id: UUID) -> bool:
+        """Delete company by ID."""
+        result = await self.session.execute(
+            select(CompanyModel).where(CompanyModel.id == entity_id)
+        )
+        model = result.scalar_one_or_none()
+        if model:
+            await self.session.delete(model)
+            return True
+        return False
 
     async def get_by_name(self, name: str) -> Optional[CompanyProfile]:
         """Get company by name."""
@@ -392,7 +409,11 @@ class SQLCompanyRepository(CompanyRepository):
 
     def _to_entity(self, model: CompanyModel) -> CompanyProfile:
         """Convert model to entity."""
+        competitive_advantages = [model.competitive_advantage] if model.competitive_advantage else []
         return CompanyProfile(
+            id=model.id,
+            ticker=model.ticker,
+            exchange=model.exchange,
             legal_name=model.legal_name,
             common_name=model.common_name,
             description=model.description or "",
@@ -400,21 +421,13 @@ class SQLCompanyRepository(CompanyRepository):
             sector=model.sector,
             industry=model.industry,
             headquarters=model.headquarters or "",
-            founded_year=model.founded_year,
             employee_count=model.employee_count,
             website=model.website or "",
             ceo=model.ceo or "",
             cfo=model.cfo or "",
-            chairman=model.chairman or "",
             board_members=model.board_members or [],
             major_shareholders=model.major_shareholders or {},
-            competitors=model.competitors or [],
-            competitive_advantages=model.competitive_advantages or [],
-            risk_factors=model.risk_factors or [],
-            key_products=model.key_products or [],
-            target_markets=model.target_markets or [],
-            regulatory_environment=model.regulatory_environment or "",
-            esg_score=model.esg_score,
+            competitive_advantages=competitive_advantages,
         )
 
 

@@ -1,10 +1,12 @@
 """Use cases for IPO discovery and analysis orchestration."""
 
+import logging
+from dataclasses import replace
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from app.application.interfaces.repositories import IPORepository, JobRepository
+from app.application.interfaces.repositories import IPORepository, JobRepository, CompanyRepository
 from app.domain.enums.enums import (
     IPOStatus,
     Exchange,
@@ -12,8 +14,9 @@ from app.domain.enums.enums import (
     JobType,
     JobStatus,
     AgentName,
+    AgentStatus,
 )
-from app.domain.value_objects.value_objects import IPODetails
+from app.domain.value_objects.value_objects import IPODetails, CompanyProfile
 from app.agents.base import AgentContext, AgentOrchestrator
 from app.agents.discovery.agent import DiscoveryAgent
 from app.agents.collection.agent import CollectionAgent
@@ -31,71 +34,82 @@ from app.core.exceptions.base import AgentError
 class DiscoverIPOsUseCase:
     """Use case for discovering IPOs."""
 
+    DEFAULT_SOURCES = ["nasdaq", "nyse", "sec", "renaissance", "investorgain"]
+
     def __init__(
         self,
         ipo_repo: IPORepository,
-        job_repo: JobRepository,
+        company_repo: CompanyRepository,
     ):
         self.ipo_repo = ipo_repo
-        self.job_repo = job_repo
+        self.company_repo = company_repo
 
     async def execute(
         self,
         sources: List[str] = None,
         lookahead_days: int = 90,
         min_market_cap: float = 0,
-    ) -> Dict[str, Any]:
-        """Execute IPO discovery."""
-        # Create discovery job
-        job_id = await self.job_repo.create_job(
-            job_type=JobType.IPO_DISCOVERY,
-            payload={
-                "sources": sources or ["nasdaq", "nyse", "sec", "renaissance"],
-                "lookahead_days": lookahead_days,
-                "min_market_cap": min_market_cap,
-            },
-            priority=5,
-        )
+    ) -> List[IPODetails]:
+        """Execute IPO discovery and persist results."""
+        sources = sources or self.DEFAULT_SOURCES
 
         # Run discovery agent
         discovery_agent = DiscoveryAgent()
 
         context = AgentContext(
             ipo_symbol="",
-            analysis_id=job_id,
+            analysis_id=None,
             parameters={
-                "sources": sources or ["nasdaq", "nyse", "sec", "renaissance"],
+                "sources": sources,
                 "lookahead_days": lookahead_days,
                 "min_market_cap": min_market_cap,
             },
         )
 
         input_data = {
-            "sources": sources or ["nasdaq", "nyse", "sec", "renaissance"],
+            "sources": sources,
             "lookahead_days": lookahead_days,
             "min_market_cap": min_market_cap,
         }
 
         result = await discovery_agent.run_with_retry(context, input_data)
 
-        # Update job status
-        if result.status == AgentStatus.COMPLETED:
-            await self.job_repo.update_job_status(
-                job_id=job_id,
-                status=JobStatus.COMPLETED,
-                result={"ipos_found": len(result.data) if result.data else 0},
-            )
-        else:
-            await self.job_repo.update_job_status(
-                job_id=job_id,
-                status=JobStatus.FAILED,
-                error=result.error,
-            )
+        if result.status not in (AgentStatus.COMPLETED, AgentStatus.PARTIAL):
+            return []
 
-        return {
-            "job_id": str(job_id),
-            "result": result.to_dict() if hasattr(result, 'to_dict') else result.__dict__,
-        }
+        saved = []
+        for ipo in result.data or []:
+            try:
+                # Upsert company profile first (ipos.company_id is a required FK)
+                company = await self.company_repo.get_by_symbol(ipo.symbol)
+                if company is None:
+                    company = CompanyProfile(
+                        legal_name=ipo.company_name,
+                        common_name=ipo.company_name,
+                        description="",
+                        business_model="",
+                        ticker=ipo.symbol,
+                        exchange=ipo.exchange,
+                        sector=ipo.sector,
+                        industry=ipo.industry,
+                    )
+                    company_id = await self.company_repo.save(company)
+                else:
+                    company_id = company.id
+
+                # Skip IPOs we already know about
+                if await self.ipo_repo.get_by_symbol(ipo.symbol):
+                    continue
+
+                await self.ipo_repo.save(replace(ipo, company_id=company_id))
+                saved.append(ipo)
+            except Exception as e:
+                logging.getLogger(__name__).warning(
+                    "Skipping IPO %s: %s", getattr(ipo, "symbol", "?"), e
+                )
+                continue
+
+        return saved
 
 
 class GetUpcomingIPOsUseCase:
@@ -132,12 +146,9 @@ class GetIPODetailsUseCase:
     def __init__(self, ipo_repo: IPORepository):
         self.ipo_repo = ipo_repo
 
-    async def execute(self, symbol: str) -> Optional[Dict[str, Any]]:
+    async def execute(self, symbol: str) -> Optional[IPODetails]:
         """Get IPO details by symbol."""
-        ipo = await self.ipo_repo.get_by_symbol(symbol.upper())
-        if ipo:
-            return ipo.to_dict() if hasattr(ipo, 'to_dict') else ipo.__dict__
-        return None
+        return await self.ipo_repo.get_by_symbol(symbol.upper())
 
 
 class SearchIPOsUseCase:
@@ -146,10 +157,9 @@ class SearchIPOsUseCase:
     def __init__(self, ipo_repo: IPORepository):
         self.ipo_repo = ipo_repo
 
-    async def execute(self, query: str, limit: int = 20) -> List[Dict[str, Any]]:
+    async def execute(self, query: str, limit: int = 20) -> List[IPODetails]:
         """Search IPOs."""
-        ipos = await self.ipo_repo.search(query, limit)
-        return [ipo.to_dict() if hasattr(ipo, 'to_dict') else ipo.__dict__ for ipo in ipos]
+        return await self.ipo_repo.search(query, limit)
 
 
 class GetRecentIPOsUseCase:
@@ -158,10 +168,9 @@ class GetRecentIPOsUseCase:
     def __init__(self, ipo_repo: IPORepository):
         self.ipo_repo = ipo_repo
 
-    async def execute(self, days: int = 30, limit: int = 20) -> List[Dict[str, Any]]:
+    async def execute(self, days: int = 30, limit: int = 20) -> List[IPODetails]:
         """Get recently listed IPOs."""
-        ipos = await self.ipo_repo.get_recently_listed(days, limit)
-        return [ipo.to_dict() if hasattr(ipo, 'to_dict') else ipo.__dict__ for ipo in ipos]
+        return await self.ipo_repo.get_recently_listed(days, limit)
 
 
 class AnalyzeIPOUseCase:

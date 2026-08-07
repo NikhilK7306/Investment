@@ -264,6 +264,9 @@ class CompanyProfile:
     business_model: str
     sector: Sector
     industry: Industry
+    id: Optional[UUID] = None
+    ticker: str = ""
+    exchange: Exchange = Exchange.OTHER
     sub_industry: Optional[str] = None
     headquarters: str = ""
     country: str = ""
@@ -292,6 +295,8 @@ class CompanyProfile:
             "sector": self.sector.value,
             "industry": self.industry.value,
             "sub_industry": self.sub_industry,
+            "ticker": self.ticker,
+            "exchange": self.exchange.value,
             "headquarters": self.headquarters,
             "country": self.country,
             "founded_year": self.founded_year,
@@ -318,10 +323,14 @@ class IPODetails:
     symbol: str
     company_name: str
     exchange: Exchange
+    sector: Sector = Sector.UNCLASSIFIED
+    industry: Industry = Industry.OTHER
     expected_date: Optional[datetime] = None
+    announced_date: Optional[datetime] = None
     filing_date: Optional[datetime] = None
     pricing_date: Optional[datetime] = None
-    listing_date: Optional[datetime] = None
+    listed_date: Optional[datetime] = None
+    withdrawn_date: Optional[datetime] = None
     status: str = "announced"
     shares_offered: Optional[int] = None
     price_range: Optional[PriceRange] = None
@@ -342,12 +351,15 @@ class IPODetails:
     registration_statement: str = ""
     prospectus_url: str = ""
     sec_cik: str = ""
+    company_id: Optional[UUID] = None
     
     def to_dict(self) -> dict:
         result = {
             "symbol": self.symbol,
             "company_name": self.company_name,
             "exchange": self.exchange.value,
+            "sector": self.sector.value,
+            "industry": self.industry.value,
             "status": self.status,
             "shares_offered": self.shares_offered,
             "use_of_proceeds": self.use_of_proceeds,
@@ -363,12 +375,18 @@ class IPODetails:
         
         if self.expected_date:
             result["expected_date"] = self.expected_date.isoformat()
+        if self.announced_date:
+            result["announced_date"] = self.announced_date.isoformat()
         if self.filing_date:
             result["filing_date"] = self.filing_date.isoformat()
         if self.pricing_date:
             result["pricing_date"] = self.pricing_date.isoformat()
-        if self.listing_date:
-            result["listing_date"] = self.listing_date.isoformat()
+        if self.listed_date:
+            result["listed_date"] = self.listed_date.isoformat()
+        if self.withdrawn_date:
+            result["withdrawn_date"] = self.withdrawn_date.isoformat()
+        if self.company_id:
+            result["company_id"] = str(self.company_id)
         if self.lockup_expiry:
             result["lockup_expiry"] = self.lockup_expiry.isoformat()
         if self.price_range:

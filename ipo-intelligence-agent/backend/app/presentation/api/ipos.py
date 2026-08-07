@@ -40,18 +40,15 @@ async def get_company_repo():
         yield SQLCompanyRepository(session)
 
 
-async def get_discover_use_case(
-    ipo_repo=Depends(get_ipo_repo),
-    company_repo=Depends(get_company_repo),
-):
-    return DiscoverIPOsUseCase(ipo_repo, company_repo)
+async def get_discover_use_case():
+    async with get_db_session() as session:
+        yield DiscoverIPOsUseCase(SQLIPORepository(session), SQLCompanyRepository(session))
 
 
 async def get_details_use_case(
     ipo_repo=Depends(get_ipo_repo),
-    company_repo=Depends(get_company_repo),
 ):
-    return GetIPODetailsUseCase(ipo_repo, company_repo)
+    return GetIPODetailsUseCase(ipo_repo)
 
 
 async def get_list_use_case(ipo_repo=Depends(get_ipo_repo)):
@@ -190,7 +187,7 @@ class CompanyProfileResponse(BaseModel):
 @router.post("/discover", response_model=List[IPORResponse])
 async def discover_ipos(
     lookahead_days: int = Query(90, ge=1, le=365),
-    sources: List[str] = Query(["nasdaq", "nyse", "sec", "renaissance"]),
+    sources: List[str] = Query(["nasdaq", "nyse", "sec", "renaissance", "investorgain"]),
     min_market_cap: float = Query(0, ge=0),
     use_case: DiscoverIPOsUseCase = Depends(get_discover_use_case),
 ):
