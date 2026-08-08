@@ -140,10 +140,10 @@ Return structured data for each IPO found. Be thorough but avoid duplicates."""
         )
     
     async def _fetch_nasdaq_ipos(self, lookahead_days: int) -> List[IPODetails]:
-        """Fetch IPOs from NASDAQ."""
+        """Fetch IPOs from NASDAQ (filed and upcoming calendar sections)."""
         ipos = []
         try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
                 response = await client.get(
                     "https://api.nasdaq.com/api/ipo/calendar",
                     params={"limit": 100},
@@ -152,44 +152,66 @@ Return structured data for each IPO found. Be thorough but avoid duplicates."""
                 
                 if response.status_code == 200:
                     data = response.json()
-                    for item in data.get("data", {}).get("upcoming", []):
-                        ipo = self._parse_nasdaq_item(item)
-                        if ipo:
-                            ipos.append(ipo)
+                    sections = data.get("data", {})
+                    for section in ("filed", "upcoming"):
+                        table = sections.get(section)
+                        if not isinstance(table, dict):
+                            continue
+                        for item in table.get("rows", []):
+                            ipo = self._parse_nasdaq_item(item)
+                            if ipo:
+                                ipos.append(ipo)
         except Exception as e:
             raise AgentError(f"NASDAQ fetch failed: {e}", self.name.value)
         return ipos
     
     def _parse_nasdaq_item(self, item: Dict[str, Any]) -> Optional[IPODetails]:
-        """Parse NASDAQ IPO item."""
+        """Parse a NASDAQ IPO calendar row (current API schema)."""
         try:
-            symbol = item.get("symbol", "").upper()
+            symbol = (item.get("proposedTickerSymbol") or item.get("symbol") or "").upper().strip()
             if not symbol or symbol in self._seen_symbols:
                 return None
             
             self._seen_symbols.add(symbol)
             
-            expected_date = None
-            if item.get("expectedDate"):
-                expected_date = datetime.fromisoformat(item["expectedDate"].replace("Z", "+00:00"))
+            exchange = Exchange.NASDAQ
+            exchange_raw = (item.get("proposedExchange") or "").upper()
+            if "NYSE" in exchange_raw:
+                exchange = Exchange.NYSE
+            
+            expected_date = self._parse_date(
+                item.get("expectedDate") or item.get("pricedDate") or item.get("filedDate")
+            )
             
             price_range = None
-            if item.get("priceRange"):
-                parts = item["priceRange"].split(" - ")
-                if len(parts) == 2:
-                    low = Money.from_string(parts[0].strip())
-                    high = Money.from_string(parts[1].strip())
-                    price_range = PriceRange(low=low, high=high)
+            offer_price = None
+            price_raw = (item.get("proposedSharePrice") or "").replace(",", "").strip()
+            if price_raw:
+                try:
+                    amount = Decimal(price_raw)
+                    offer_price = Money(amount=amount, currency="USD")
+                    price_range = PriceRange(low=offer_price, high=offer_price)
+                except Exception:
+                    price_range = None
+            
+            shares_offered = None
+            shares_raw = (item.get("sharesOffered") or "").replace(",", "").strip()
+            if shares_raw:
+                try:
+                    shares_offered = int(Decimal(shares_raw))
+                except Exception:
+                    pass
             
             return IPODetails(
                 symbol=symbol,
                 company_name=item.get("companyName", ""),
-                exchange=Exchange.NASDAQ,
+                exchange=exchange,
                 expected_date=expected_date,
                 status=IPOStatus.FILED.value,
-                shares_offered=item.get("sharesOffered"),
+                shares_offered=shares_offered,
                 price_range=price_range,
-                underwriters=item.get("underwriters", []),
+                offer_price=offer_price,
+                underwriters=[],
                 sector=self._map_sector(item.get("sector", "")),
                 industry=self._map_industry(item.get("industry", "")),
             )

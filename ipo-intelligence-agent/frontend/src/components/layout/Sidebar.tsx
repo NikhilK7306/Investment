@@ -118,8 +118,8 @@ export function Sidebar() {
                     <User className="h-4 w-4 text-primary" />
                   </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-sm font-medium truncate">Analyst</p>
-                    <p className="text-xs text-muted-foreground truncate">analyst@ipo.ai</p>
+                    <p className="text-sm font-medium truncate">Local User</p>
+                    <p className="text-xs text-muted-foreground truncate">no account configured</p>
                   </div>
                 </div>
               </div>
@@ -157,9 +157,6 @@ export function Header() {
           </button>
           <button className="relative p-2 rounded-md hover:bg-accent transition-colors">
             <Bell className="h-5 w-5" />
-            <span className="absolute top-1 right-1 h-4 w-4 rounded-full bg-red-500 text-xs text-white flex items-center justify-center">
-              3
-            </span>
           </button>
           <div className="h-8 w-px bg-border mx-2" />
           <button className="p-2 rounded-md hover:bg-accent transition-colors">

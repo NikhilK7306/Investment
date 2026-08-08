@@ -243,6 +243,9 @@ class AnalysisResponse(BaseModel):
     bear_case: Optional[str] = None
     key_risks: List[str] = []
     key_catalysts: List[str] = []
+    sentiment: Optional[str] = None
+    sentiment_score: Optional[float] = None
+    sentiment_drivers: List[str] = []
     score_breakdown: Dict[str, float] = {}
     agent_results: Any = {}
     completed_at: Optional[datetime] = None
@@ -276,6 +279,9 @@ def _analysis_to_response(result, symbol: str) -> AnalysisResponse:
         bear_case=expr("bear_case"),
         key_risks=expr("key_risks", []) or [],
         key_catalysts=expr("key_catalysts", []) or [],
+        sentiment=enum_str(expr("sentiment")),
+        sentiment_score=expr("sentiment_score"),
+        sentiment_drivers=expr("sentiment_drivers", []) or [],
         score_breakdown=expr("score_breakdown", {}) or {},
         agent_results=agent_results,
         completed_at=expr("completed_at"),

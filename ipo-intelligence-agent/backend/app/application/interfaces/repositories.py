@@ -400,6 +400,11 @@ class FailureMemoryRepository(MemoryRepository):
     """Failure memory repository."""
     
     @abstractmethod
+    async def list_all(self, limit: int = 100) -> List[FailureMemory]:
+        """List all failure memory entries (newest first)."""
+        pass
+
+    @abstractmethod
     async def find_similar(
         self,
         error_message: str,
@@ -442,6 +447,11 @@ class SuccessMemoryRepository(MemoryRepository):
     """Success memory repository."""
     
     @abstractmethod
+    async def list_all(self, limit: int = 100) -> List[SuccessMemory]:
+        """List all success memory entries (newest first)."""
+        pass
+
+    @abstractmethod
     async def find_successful_strategies(
         self,
         context: Dict[str, Any],
@@ -475,6 +485,11 @@ class KnowledgeMemoryRepository(MemoryRepository):
     """Knowledge memory repository."""
     
     @abstractmethod
+    async def list_all(self, limit: int = 100) -> List[KnowledgeMemory]:
+        """List all knowledge entries (newest first)."""
+        pass
+
+    @abstractmethod
     async def get_by_concept(
         self,
         concept: str,
@@ -507,6 +522,11 @@ class BestPracticeRepository(MemoryRepository):
     """Best practice memory repository."""
     
     @abstractmethod
+    async def list_all(self, limit: int = 100) -> List[BestPracticeMemory]:
+        """List all best practice entries (newest first)."""
+        pass
+
+    @abstractmethod
     async def get_applicable_practices(
         self,
         context: Dict[str, Any],
@@ -527,6 +547,11 @@ class BestPracticeRepository(MemoryRepository):
 class ReflectionMemoryRepository(MemoryRepository):
     """Reflection memory repository."""
     
+    @abstractmethod
+    async def list_all(self, limit: int = 100) -> List[ReflectionMemory]:
+        """List all reflection entries (newest first)."""
+        pass
+
     @abstractmethod
     async def get_by_prediction(
         self,
@@ -556,6 +581,11 @@ class ReflectionMemoryRepository(MemoryRepository):
 class LessonRepository(IORepository):
     """Lesson learned repository."""
     
+    @abstractmethod
+    async def list_all(self, limit: int = 100) -> List[Lesson]:
+        """List all lessons (newest first)."""
+        pass
+
     @abstractmethod
     async def save(self, lesson: Lesson) -> UUID:
         """Save lesson."""

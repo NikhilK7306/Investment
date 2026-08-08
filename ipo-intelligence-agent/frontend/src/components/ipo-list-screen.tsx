@@ -143,23 +143,40 @@ export default function IPOListScreen({
     return `${sym}${low} - ${sym}${high}`;
   };
 
+  const isIndia = region === "india";
+  const accent = isIndia
+    ? "from-orange-500/20 via-amber-500/10 to-transparent"
+    : "from-sky-500/20 via-indigo-500/10 to-transparent";
+  const accentText = isIndia ? "text-orange-600" : "text-indigo-600";
+  const regionTag = isIndia ? "NSE · BSE" : "NASDAQ · NYSE · US";
+  const tagStyles = isIndia
+    ? "border-orange-500/40 bg-orange-500/10 text-orange-600"
+    : "border-sky-500/40 bg-sky-500/10 text-sky-600";
+
   return (
     <div className="min-h-screen bg-background">
       <div className="space-y-6">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
-          <div>
-            <h1 className="text-3xl font-bold tracking-tight">{regionLabel} IPOs</h1>
-            <p className="text-muted-foreground">{description}</p>
-          </div>
-          <div className="flex gap-2">
-            <Button variant="outline" size="sm" onClick={discover} disabled={discovering}>
-              <Rocket className={`h-4 w-4 mr-2 ${discovering ? "animate-pulse" : ""}`} />
-              {discovering ? "Discovering..." : "Discover"}
-            </Button>
-            <Button variant="outline" size="sm" onClick={fetchAll} disabled={loading}>
-              <RefreshCw className={`h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}`} />
-              {loading ? "Loading..." : "Refresh"}
-            </Button>
+        <div className={`rounded-xl bg-gradient-to-r ${accent} border p-6`}>
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:justify-between">
+            <div>
+              <div className="flex items-center gap-3">
+                <h1 className="text-3xl font-bold tracking-tight">{regionLabel} IPOs</h1>
+                <span className={`rounded-full border px-2.5 py-0.5 text-xs font-medium ${tagStyles}`}>
+                  {regionTag}
+                </span>
+              </div>
+              <p className={accentText}>{description}</p>
+            </div>
+            <div className="flex gap-2">
+              <Button variant="outline" size="sm" onClick={discover} disabled={discovering}>
+                <Rocket className={`h-4 w-4 mr-2 ${discovering ? "animate-pulse" : ""}`} />
+                {discovering ? "Discovering..." : "Discover"}
+              </Button>
+              <Button variant="outline" size="sm" onClick={fetchAll} disabled={loading}>
+                <RefreshCw className={`h-4 w-4 mr-2 ${loading ? "animate-spin" : ""}`} />
+                {loading ? "Loading..." : "Refresh"}
+              </Button>
+            </div>
           </div>
         </div>
 

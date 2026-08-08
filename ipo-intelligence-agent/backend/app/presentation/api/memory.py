@@ -265,6 +265,20 @@ class SuccessRecordResponse(BaseModel):
     recorded: bool
 
 
+class SuccessResponse(BaseModel):
+    success_id: str
+    agent_name: str
+    strategy_description: str
+    prompt_used: str
+    tool_sequence: List[str]
+    api_sequence: List[str]
+    confidence: float
+    success_rate: float
+    reuse_count: int
+    context: Dict[str, Any] = {}
+    ipo_symbol: Optional[str] = None
+
+
 class SuccessSearchRequest(BaseModel):
     context: Dict[str, Any]
     agent_name: AgentName
@@ -579,6 +593,33 @@ async def get_unresolved_failures(
     ]
 
 
+@router.get("/failures", response_model=List[FailureResponse])
+async def list_failures(
+    limit: int = Query(100, ge=1, le=500),
+    repo: SQLFailureMemoryRepository = Depends(get_failure_repo),
+):
+    """List all failures (newest first)."""
+    failures = await repo.list_all(limit=limit)
+    return [
+        FailureResponse(
+            failure_id=f.failure_id,
+            agent_name=f.agent_name.value if hasattr(f.agent_name, "value") else str(f.agent_name),
+            error_type=f.error_type,
+            error_message=f.error_message,
+            root_cause=f.root_cause,
+            attempted_fix=f.attempted_fix,
+            resolved=f.resolved,
+            resolution=f.resolution,
+            category=f.category.value if hasattr(f.category, "value") else str(f.category),
+            severity=f.severity.value if hasattr(f.severity, "value") else str(f.severity),
+            occurrences=f.occurrences,
+            last_occurrence=f.last_occurrence,
+            ipo_symbol=f.metadata.get("ipo_symbol") if f.metadata else None,
+        )
+        for f in failures
+    ]
+
+
 # Success Memory Endpoints
 @router.post("/successes", response_model=SuccessRecordResponse, status_code=status.HTTP_201_CREATED)
 async def record_success(
@@ -614,6 +655,31 @@ async def search_successes(
         limit=request.limit,
     )
     return [{"success": r[0].__dict__, "similarity": r[1]} for r in results]
+
+
+@router.get("/successes", response_model=List[SuccessResponse])
+async def list_successes(
+    limit: int = Query(100, ge=1, le=500),
+    repo: SQLSuccessMemoryRepository = Depends(get_success_repo),
+):
+    """List all successful strategies (newest first)."""
+    successes = await repo.list_all(limit=limit)
+    return [
+        SuccessResponse(
+            success_id=s.success_id,
+            agent_name=s.agent_name.value if hasattr(s.agent_name, "value") else str(s.agent_name),
+            strategy_description=s.strategy_description,
+            prompt_used=s.prompt_used,
+            tool_sequence=s.tool_sequence or [],
+            api_sequence=s.api_sequence or [],
+            confidence=s.confidence,
+            success_rate=s.success_rate,
+            reuse_count=s.reuse_count,
+            context=(s.metadata or {}).get("context", {}) if isinstance((s.metadata or {}).get("context", {}), dict) else {},
+            ipo_symbol=(s.metadata or {}).get("ipo_symbol"),
+        )
+        for s in successes
+    ]
 
 
 @router.post("/successes/{success_id}/reuse", response_model=Dict[str, bool])
@@ -718,6 +784,27 @@ async def get_knowledge_by_domain(
     ]
 
 
+@router.get("/knowledge", response_model=List[KnowledgeResponse])
+async def list_knowledge(
+    limit: int = Query(100, ge=1, le=500),
+    repo: SQLKnowledgeMemoryRepository = Depends(get_knowledge_repo),
+):
+    """List all knowledge concepts (newest first)."""
+    knowledge = await repo.list_all(limit=limit)
+    return [
+        KnowledgeResponse(
+            concept=k.concept,
+            description=k.description,
+            evidence=k.evidence or [],
+            confidence=k.confidence,
+            domain=k.domain,
+            tags=k.tags,
+            version=k.version,
+        )
+        for k in knowledge
+    ]
+
+
 # Best Practice Endpoints
 @router.post("/best-practices", response_model=BestPracticeResponse, status_code=status.HTTP_201_CREATED)
 async def store_best_practice(
@@ -758,6 +845,28 @@ async def get_applicable_practices(
             practice_name=p.practice_name,
             description=p.description,
             applicable_context=p.applicable_context,
+            success_rate=p.success_rate,
+            usage_count=p.usage_count,
+            tags=p.tags,
+            version=p.version,
+        )
+        for p in practices
+    ]
+
+
+@router.get("/best-practices", response_model=List[BestPracticeResponse])
+async def list_best_practices(
+    limit: int = Query(100, ge=1, le=500),
+    repo: SQLBestPracticeRepository = Depends(get_practice_repo),
+):
+    """List all best practices (newest first)."""
+    practices = await repo.list_all(limit=limit)
+    return [
+        BestPracticeResponse(
+            practice_id=str(p.id),
+            practice_name=p.practice_name,
+            description=p.description,
+            applicable_context=p.applicable_context or {},
             success_rate=p.success_rate,
             usage_count=p.usage_count,
             tags=p.tags,
@@ -892,6 +1001,36 @@ async def get_unprocessed_reflections(
     ]
 
 
+@router.get("/reflections", response_model=List[ReflectionItem])
+async def list_reflections(
+    limit: int = Query(100, ge=1, le=500),
+    repo: SQLReflectionMemoryRepository = Depends(get_reflection_repo),
+):
+    """List all reflections (newest first)."""
+    reflections = await repo.list_all(limit=limit)
+    return [
+        ReflectionItem(
+            prediction_id=str(r.prediction_id),
+            ipo_symbol=r.ipo_symbol,
+            prediction_type=r.prediction_type.value if hasattr(r.prediction_type, "value") else str(r.prediction_type),
+            predicted_value=r.predicted_value,
+            actual_value=r.actual_value,
+            accuracy=r.accuracy,
+            error=r.error,
+            mistakes_identified=r.mistakes_identified,
+            correct_assumptions=r.correct_assumptions,
+            missing_factors=r.missing_factors,
+            lessons_extracted=r.lessons_extracted,
+            prompt_improvements=r.prompt_improvements,
+            strategy_changes=r.strategy_changes,
+            knowledge_updates=r.knowledge_updates,
+            processed=r.processed,
+            created_at=r.created_at,
+        )
+        for r in reflections
+    ]
+
+
 # Lesson Endpoints
 @router.post("/lessons", response_model=Dict[str, str], status_code=status.HTTP_201_CREATED)
 async def save_lesson(
@@ -915,6 +1054,37 @@ async def save_lesson(
         tags=request.tags,
     )
     return {"lesson_id": str(lesson_id)}
+
+
+@router.get("/lessons", response_model=List[LessonResponse])
+async def list_lessons(
+    limit: int = Query(100, ge=1, le=500),
+    repo: SQLLessonRepository = Depends(get_lesson_repo),
+):
+    """List all lessons (newest first)."""
+    lessons = await repo.list_all(limit=limit)
+    return [
+        LessonResponse(
+            id=str(l.id),
+            lesson_type=l.lesson_type.value if hasattr(l.lesson_type, "value") else str(l.lesson_type),
+            title=l.title,
+            description=l.description,
+            do=l.do,
+            dont=l.dont,
+            best_practices=l.best_practices,
+            anti_patterns=l.anti_patterns,
+            known_bugs=l.known_bugs,
+            prompt_improvements=l.prompt_improvements,
+            confidence=l.confidence,
+            evidence=l.evidence,
+            applicable_agents=[a.value for a in l.applicable_agents],
+            tags=l.tags,
+            version=l.version,
+            created_at=l.created_at,
+            updated_at=l.updated_at,
+        )
+        for l in lessons
+    ]
 
 
 @router.get("/lessons/{lesson_id}", response_model=Optional[LessonResponse])

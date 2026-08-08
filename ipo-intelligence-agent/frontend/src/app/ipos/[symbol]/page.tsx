@@ -24,8 +24,25 @@ import {
 } from "lucide-react";
 import { ipoService } from "@/services/ipoService";
 import { analysisService } from "@/services/analysisService";
-import type { IPOResponse } from "@/types/ipo";
+import type { IPOResponse, FinancialPeriod } from "@/types/ipo";
 import type { AnalysisResponse, ReportData } from "@/types/analysis";
+
+const compactMoney = (currency: string, value: number | null | undefined): string => {
+  if (value === null || value === undefined || Number.isNaN(value)) return "N/A";
+  const abs = Math.abs(value);
+  let formatted: string;
+  if (abs >= 1e12) formatted = `${(value / 1e12).toFixed(2)}T`;
+  else if (abs >= 1e9) formatted = `${(value / 1e9).toFixed(2)}B`;
+  else if (abs >= 1e6) formatted = `${(value / 1e6).toFixed(2)}M`;
+  else if (abs >= 1e3) formatted = `${(value / 1e3).toFixed(1)}K`;
+  else formatted = value.toFixed(0);
+  return `${currency}${formatted}`;
+};
+
+const compactPercent = (value: number | null | undefined): string => {
+  if (value === null || value === undefined || Number.isNaN(value)) return "N/A";
+  return `${(value * 100).toFixed(1)}%`;
+};
 
 export default function IPODetailPage({ params }: { params: Promise<{ symbol: string }> }) {
   const { symbol: rawSymbol } = use(params);
@@ -33,6 +50,7 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
   const router = useRouter();
   const [ipo, setIpo] = useState<IPOResponse | null>(null);
   const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
+  const [financials, setFinancials] = useState<FinancialPeriod[]>([]);
   const [report, setReport] = useState<ReportData | null>(null);
   const [reportLoading, setReportLoading] = useState(false);
   const [generateReportLoading, setGenerateReportLoading] = useState(false);
@@ -44,12 +62,14 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
     const fetch = async () => {
       setLoading(true);
       try {
-        const [ipoData, analysisData] = await Promise.all([
+        const [ipoData, analysisData, financialsData] = await Promise.all([
           ipoService.getBySymbol(symbol).catch(() => null),
           analysisService.getResult(symbol).catch(() => null),
+          ipoService.getFinancials(symbol).catch(() => null),
         ]);
         setIpo(ipoData);
         setAnalysis(analysisData);
+        setFinancials(financialsData?.periods || []);
       } catch (err) {
         console.error("Failed to fetch IPO:", err);
       } finally {
@@ -79,25 +99,6 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
     if (activeTab === "report") loadReport();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [activeTab, symbol]);
-
-  useEffect(() => {
-    const fetch = async () => {
-      setLoading(true);
-      try {
-        const [ipoData, analysisData] = await Promise.all([
-          ipoService.getBySymbol(symbol).catch(() => null),
-          analysisService.getResult(symbol).catch(() => null),
-        ]);
-        setIpo(ipoData);
-        setAnalysis(analysisData);
-      } catch (err) {
-        console.error("Failed to fetch IPO:", err);
-      } finally {
-        setLoading(false);
-      }
-    };
-    fetch();
-  }, [symbol]);
 
   const statusBadgeVariant: Record<string, "default" | "success" | "outline" | "destructive" | "secondary"> = {
     FILED: "default",
@@ -133,19 +134,6 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
         score,
       }))
     : [];
-  const demoRisks = [
-    { risk: "High customer concentration (top 3 = 45% revenue)", severity: "high" },
-    { risk: "Intense competition from MSFT, GOOGL", severity: "moderate" },
-    { risk: "Key person dependency on CEO", severity: "moderate" },
-    { risk: "Regulatory uncertainty in data privacy", severity: "low" },
-  ];
-  const demoBreakdown = [
-    { label: "Financial Strength", score: 85 },
-    { label: "Growth Potential", score: 78 },
-    { label: "Market Opportunity", score: 82 },
-    { label: "Management Quality", score: 88 },
-    { label: "Risk Level (inv.)", score: 75 },
-  ];
 
   const startAnalysis = async () => {
     setAnalyzing(true);
@@ -255,15 +243,21 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
                 <CardContent className="space-y-4">
                   {hasAnalysis ? (
                     <div className="space-y-2">
-                      {(breakdownItems.length > 0 ? breakdownItems : demoBreakdown).map((item) => (
-                        <div key={item.label || item.key} className="space-y-1">
-                          <div className="flex justify-between text-sm">
-                            <span>{item.label}</span>
-                            <span className="font-medium">{item.score}/100</span>
+                      {breakdownItems.length > 0 ? (
+                        breakdownItems.map((item) => (
+                          <div key={item.label || item.key} className="space-y-1">
+                            <div className="flex justify-between text-sm">
+                              <span>{item.label}</span>
+                              <span className="font-medium">{item.score}/100</span>
+                            </div>
+                            <Progress value={item.score} className="h-2" />
                           </div>
-                          <Progress value={item.score} className="h-2" />
-                        </div>
-                      ))}
+                        ))
+                      ) : (
+                        <p className="text-sm text-muted-foreground">
+                          No score breakdown was produced for this analysis.
+                        </p>
+                      )}
                     </div>
                   ) : (
                     <p className="text-sm text-muted-foreground">
@@ -288,17 +282,9 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
                       ))}
                     </div>
                   ) : (
-                    <div className="space-y-2">
-                      {demoRisks.map((r, i) => (
-                        <div key={i} className="flex items-center gap-2 p-2 rounded-lg bg-muted/50">
-                          <AlertTriangle className={`h-4 w-4 ${r.severity === "high" ? "text-red-500" : r.severity === "moderate" ? "text-yellow-500" : "text-green-500"}`} />
-                          <span className="text-sm">{r.risk}</span>
-                          <Badge variant={r.severity === "high" ? "destructive" : r.severity === "moderate" ? "secondary" : "outline"} className="ml-auto">
-                            {r.severity}
-                          </Badge>
-                        </div>
-                      ))}
-                    </div>
+                    <p className="text-sm text-muted-foreground">
+                      No risk assessment available yet. Run an analysis to identify key risks.
+                    </p>
                   )}
                 </CardContent>
               </Card>
@@ -312,15 +298,11 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
                 <CardContent>
                   <div className="space-y-2 text-sm">
                     {hasAnalysis && analysis.bull_case ? (
-                      <p className="font-medium text-green-700">{analysis.bull_case}</p>
+                      <p className="font-medium text-green-700 whitespace-pre-wrap">{analysis.bull_case}</p>
                     ) : (
-                      <>
-                        <p className="font-medium text-green-700">✓ Strong recurring revenue model (92% ARR)</p>
-                        <p className="font-medium text-green-700">✓ Expanding TAM with 35% CAGR</p>
-                        <p className="font-medium text-green-700">✓ Best-in-class net revenue retention (130%)</p>
-                        <p className="font-medium text-green-700">✓ Experienced management with prior exits</p>
-                        <p className="font-medium text-green-700">✓ Clear path to profitability by Q4 2025</p>
-                      </>
+                      <p className="text-sm text-muted-foreground">
+                        No bull case available yet. Run an analysis to generate one.
+                      </p>
                     )}
                   </div>
                 </CardContent>
@@ -333,15 +315,11 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
                 <CardContent>
                   <div className="space-y-2 text-sm">
                     {hasAnalysis && analysis.bear_case ? (
-                      <p className="font-medium text-red-700">{analysis.bear_case}</p>
+                      <p className="font-medium text-red-700 whitespace-pre-wrap">{analysis.bear_case}</p>
                     ) : (
-                      <>
-                        <p className="font-medium text-red-700">✗ High valuation at 15x forward revenue</p>
-                        <p className="font-medium text-red-700">✗ Customer concentration risk</p>
-                        <p className="font-medium text-red-700">✗ Increasing competition from well-funded rivals</p>
-                        <p className="font-medium text-red-700">✗ Path to profitability not yet proven</p>
-                        <p className="font-medium text-red-700">✗ Lockup expiration in 180 days</p>
-                      </>
+                      <p className="text-sm text-muted-foreground">
+                        No bear case available yet. Run an analysis to generate one.
+                      </p>
                     )}
                   </div>
                 </CardContent>
@@ -350,151 +328,193 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
           </TabsContent>
 
           <TabsContent value="financials" className="space-y-6">
-            <Card>
-              <CardHeader>
-                <CardTitle>Financial Statements</CardTitle>
-              </CardHeader>
-              <CardContent>
-                <div className="overflow-x-auto">
-                  <table className="w-full">
-                    <thead>
-                      <tr className="border-b text-left text-sm text-muted-foreground">
-                        <th className="pb-2">Metric</th>
-                        <th className="pb-2 text-right">FY2023</th>
-                        <th className="pb-2 text-right">FY2022</th>
-                        <th className="pb-2 text-right">FY2021</th>
-                        <th className="pb-2 text-right">YoY Change</th>
-                      </tr>
-                    </thead>
-                    <tbody className="text-sm">
-                      {[
-                        { metric: "Revenue", fy23: "$245.6M", fy22: "$189.2M", fy21: "$142.1M", change: "+29.8%" },
-                        { metric: "Gross Profit", fy23: "$198.7M", fy22: "$148.5M", fy21: "$108.3M", change: "+33.8%" },
-                        { metric: "Gross Margin", fy23: "81.0%", fy22: "78.5%", fy21: "76.2%", change: "+250bps" },
-                        { metric: "Operating Income", fy23: "-$12.4M", fy22: "-$28.7M", fy21: "-$35.2M", change: "Improving" },
-                        { metric: "Net Income", fy23: "-$15.8M", fy22: "-$31.2M", fy21: "-$38.9M", change: "Improving" },
-                        { metric: "Free Cash Flow", fy23: "$8.2M", fy22: "-$5.4M", fy21: "-$12.1M", change: "Turnaround" },
-                        { metric: "Cash & Equivalents", fy23: "$185.4M", fy22: "$92.1M", fy21: "$45.3M", change: "+101%" },
-                      ].map((row, i) => (
-                        <tr key={i} className="border-b last:border-0">
-                          <td className="py-3 font-medium">{row.metric}</td>
-                          <td className="py-3 text-right font-medium">{row.fy23}</td>
-                          <td className="py-3 text-right">{row.fy22}</td>
-                          <td className="py-3 text-right">{row.fy21}</td>
-                          <td className="py-3 text-right text-green-600 font-medium">{row.change}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              </CardContent>
-            </Card>
-
-            <div className="grid gap-6 md:grid-cols-2">
+            {financials.length === 0 ? (
               <Card>
-                <CardHeader>
-                  <CardTitle>Key Ratios</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  {[
-                    { name: "Revenue Growth (YoY)", value: "29.8%", trend: "up" },
-                    { name: "Gross Margin", value: "81.0%", trend: "up" },
-                    { name: "Operating Margin", value: "-5.1%", trend: "up" },
-                    { name: "Net Margin", value: "-6.4%", trend: "up" },
-                    { name: "FCF Margin", value: "3.3%", trend: "up" },
-                    { name: "Rule of 40", value: "24.7%", trend: "up" },
-                    { name: "Net Revenue Retention", value: "130%", trend: "up" },
-                    { name: "CAC Payback Period", value: "14 months", trend: "down" },
-                  ].map((r, i) => (
-                    <div key={i} className="flex items-center justify-between p-2 rounded-lg bg-muted/50">
-                      <span className="text-sm">{r.name}</span>
-                      <div className="flex items-center gap-2">
-                        <span className="font-medium">{r.value}</span>
-                        {r.trend === "up" ? <TrendingUp className="h-4 w-4 text-green-600" /> : <TrendingDown className="h-4 w-4 text-red-600" />}
+                <CardContent className="py-16 text-center">
+                  <BarChart2 className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
+                  <h3 className="text-lg font-medium">No financial statements available</h3>
+                  <p className="text-sm text-muted-foreground max-w-md mx-auto mt-2">
+                    No financial history has been collected for {symbol} yet. Financial data is
+                    populated by the collection pipeline as and when it becomes available.
+                  </p>
+                </CardContent>
+              </Card>
+            ) : (
+              <>
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Income Statement</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="overflow-x-auto">
+                      <table className="w-full">
+                        <thead>
+                          <tr className="border-b text-left text-sm text-muted-foreground">
+                            <th className="pb-2">Metric</th>
+                            {financials.map((p) => (
+                              <th key={p.period || p.period_end || p.revenue} className="pb-2 text-right">
+                                {p.period_end ? new Date(p.period_end).toLocaleDateString(undefined, { year: "numeric", month: "short" }) : p.period || "—"}
+                              </th>
+                            ))}
+                          </tr>
+                        </thead>
+                        <tbody className="text-sm">
+                          {[
+{ label: "Revenue", accessor: (p: FinancialPeriod) => compactMoney(currency, p.revenue) },
+                            { label: "Revenue Growth (YoY)", accessor: (p: FinancialPeriod) => compactPercent(p.revenue_growth_yoy) },
+                            { label: "Gross Profit", accessor: (p: FinancialPeriod) => compactMoney(currency, p.gross_profit) },
+                            { label: "Gross Margin", accessor: (p: FinancialPeriod) => compactPercent(p.gross_margin) },
+                            { label: "Operating Income", accessor: (p: FinancialPeriod) => compactMoney(currency, p.operating_income) },
+                            { label: "Operating Margin", accessor: (p: FinancialPeriod) => compactPercent(p.operating_margin) },
+                            { label: "EBITDA", accessor: (p: FinancialPeriod) => compactMoney(currency, p.ebitda) },
+                            { label: "Net Income", accessor: (p: FinancialPeriod) => compactMoney(currency, p.net_income) },
+                            { label: "Net Margin", accessor: (p: FinancialPeriod) => compactPercent(p.net_margin) },
+                            { label: "Free Cash Flow", accessor: (p: FinancialPeriod) => compactMoney(currency, p.free_cash_flow) },
+].map(({ label, accessor }) => (
+                            <tr key={label} className="border-b last:border-0">
+                              <td className="py-3 font-medium">{label}</td>
+                              {financials.map((p, i) => (
+                                <td key={i} className="py-3 text-right">{accessor(p)}</td>
+                              ))}
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </CardContent>
+                </Card>
+
+                <div className="grid gap-6 md:grid-cols-2">
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>Balance Sheet & Liquidity</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="space-y-3">
+                        {[
+                          { name: "Cash & Equivalents", fn: (p: FinancialPeriod) => compactMoney(currency, p.cash_and_equivalents) },
+                          { name: "Total Debt", fn: (p: FinancialPeriod) => compactMoney(currency, p.total_debt) },
+                          { name: "Total Equity", fn: (p: FinancialPeriod) => compactMoney(currency, p.total_equity) },
+                          { name: "Debt / Equity", fn: (p: FinancialPeriod) => (p.debt_to_equity === null ? "N/A" : p.debt_to_equity.toFixed(2)) },
+                          { name: "Current Ratio", fn: (p: FinancialPeriod) => (p.current_ratio === null ? "N/A" : p.current_ratio.toFixed(2)) },
+                        ].map(({ name, fn }) => (
+                          <div key={name} className="flex items-center justify-between p-2 rounded-lg bg-muted/50">
+                            <span className="text-sm">{name}</span>
+                            <span className="font-medium text-sm">{fn(financials[0])}</span>
+                          </div>
+                        ))}
                       </div>
-                    </div>
-                  ))}
-                </CardContent>
-              </Card>
+                    </CardContent>
+                  </Card>
 
-              <Card>
-                <CardHeader>
-                  <CardTitle>Valuation Metrics</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  {[
-                    { name: "IPO Price (Mid)", value: "$20.00" },
-                    { name: "Implied Market Cap", value: "$2.1B" },
-                    { name: "EV/Revenue (FY23)", value: "8.6x" },
-                    { name: "EV/Revenue (FY24E)", value: "6.2x" },
-                    { name: "EV/Gross Profit", value: "10.6x" },
-                    { name: "Price/FCF", value: "256x" },
-                    { name: "Peer Median EV/Rev", value: "9.2x" },
-                    { name: "Discount/Premium to Peers", value: "-6.5%", trend: "down" },
-                  ].map((m, i) => (
-                    <div key={i} className="flex items-center justify-between p-2 rounded-lg bg-muted/50">
-                      <span className="text-sm">{m.name}</span>
-                      <span className="font-medium">{m.value}</span>
-                    </div>
-                  ))}
-                </CardContent>
-              </Card>
-            </div>
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>Profitability & Efficiency</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <div className="space-y-3">
+                        {[
+                          { name: "Return on Equity (ROE)", fn: (p: FinancialPeriod) => compactPercent(p.roe) },
+                          { name: "Return on Invested Capital (ROIC)", fn: (p: FinancialPeriod) => compactPercent(p.roic) },
+                          { name: "Gross Margin", fn: (p: FinancialPeriod) => compactPercent(p.gross_margin) },
+                          { name: "Operating Margin", fn: (p: FinancialPeriod) => compactPercent(p.operating_margin) },
+                          { name: "Net Margin", fn: (p: FinancialPeriod) => compactPercent(p.net_margin) },
+                        ].map(({ name, fn }) => (
+                          <div key={name} className="flex items-center justify-between p-2 rounded-lg bg-muted/50">
+                            <span className="text-sm">{name}</span>
+                            <span className="font-medium text-sm">{fn(financials[0])}</span>
+                          </div>
+                        ))}
+                        <p className="text-xs text-muted-foreground pt-2">
+                          Latest period: {financials[0].period_end ? new Date(financials[0].period_end).toLocaleDateString() : financials[0].period || "N/A"}
+                        </p>
+                      </div>
+                    </CardContent>
+                  </Card>
+                </div>
+              </>
+            )}
           </TabsContent>
 
           <TabsContent value="analysis" className="space-y-6">
-            <div className="grid gap-6 md:grid-cols-2">
-              <Card>
-                <CardHeader>
-                  <CardTitle>Fundamental Analysis</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="p-4 rounded-lg bg-green-50 border border-green-200">
-                    <p className="font-medium text-green-800">Strengths</p>
-                    <ul className="mt-2 space-y-1 text-sm text-green-700">
-                      <li>• Exceptional gross margins (81%) with improving trend</li>
-                      <li>• Strong net revenue retention (130%)</li>
-                      <li>• Accelerating revenue growth (29.8% YoY)</li>
-                      <li>• Improving FCF trajectory, turning positive</li>
-                    </ul>
-                  </div>
-                  <div className="p-4 rounded-lg bg-yellow-50 border border-yellow-200">
-                    <p className="font-medium text-yellow-800">Concerns</p>
-                    <ul className="mt-2 space-y-1 text-sm text-yellow-700">
-                      <li>• Still operating at a net loss</li>
-                      <li>• High S&M spend (65% of revenue)</li>
-                      <li>• Customer concentration risk</li>
-                    </ul>
-                  </div>
-                </CardContent>
-              </Card>
+            {hasAnalysis ? (
+              <div className="grid gap-6 md:grid-cols-2">
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Bull Case</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    {analysis.bull_case ? (
+                      <p className="text-sm whitespace-pre-wrap">{analysis.bull_case}</p>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">Not produced in the latest analysis.</p>
+                    )}
+                  </CardContent>
+                </Card>
 
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Bear Case</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    {analysis.bear_case ? (
+                      <p className="text-sm whitespace-pre-wrap">{analysis.bear_case}</p>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">Not produced in the latest analysis.</p>
+                    )}
+                  </CardContent>
+                </Card>
+
+                {analysis.key_catalysts.length > 0 && (
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>Key Catalysts</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <ul className="space-y-2 text-sm">
+                        {analysis.key_catalysts.map((c, i) => (
+                          <li key={i} className="flex items-start gap-2">
+                            <CheckCircle className="h-4 w-4 mt-0.5 text-green-500 shrink-0" />
+                            <span>{c}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </CardContent>
+                  </Card>
+                )}
+
+                {analysis.key_risks.length > 0 && (
+                  <Card>
+                    <CardHeader>
+                      <CardTitle>Key Risks</CardTitle>
+                    </CardHeader>
+                    <CardContent>
+                      <ul className="space-y-2 text-sm">
+                        {analysis.key_risks.map((r, i) => (
+                          <li key={i} className="flex items-start gap-2">
+                            <AlertTriangle className="h-4 w-4 mt-0.5 text-yellow-500 shrink-0" />
+                            <span>{r}</span>
+                          </li>
+                        ))}
+                      </ul>
+                    </CardContent>
+                  </Card>
+                )}
+              </div>
+            ) : (
               <Card>
-                <CardHeader>
-                  <CardTitle>Market Analysis</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-4">
-                  <div className="p-4 rounded-lg bg-blue-50 border border-blue-200">
-                    <p className="font-medium text-blue-800">Market Opportunity</p>
-                    <ul className="mt-2 space-y-1 text-sm text-blue-700">
-                      <li>• TAM: $45B (Enterprise Software)</li>
-                      <li>• SAM: $12B (Vertical SaaS)</li>
-                      <li>• SOM: $800M (5-year target)</li>
-                      <li>• Market growing at 35% CAGR</li>
-                    </ul>
-                  </div>
-                  <div className="p-4 rounded-lg bg-purple-50 border border-purple-200">
-                    <p className="font-medium text-purple-800">Competitive Position</p>
-                    <ul className="mt-2 space-y-1 text-sm text-purple-700">
-                      <li>• #3 player in niche vertical</li>
-                      <li>• Strong differentiation via AI/ML</li>
-                      <li>• High switching costs (130% NRR)</li>
-                      <li>• Patent portfolio: 47 granted</li>
-                    </ul>
-                  </div>
+                <CardContent className="py-16 text-center">
+                  <Brain className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
+                  <h3 className="text-lg font-medium">No analysis available</h3>
+                  <p className="text-sm text-muted-foreground max-w-md mx-auto mt-2">
+                    Run an analysis for {symbol} to see the AI's bull/bear arguments, catalysts and risks.
+                  </p>
+                  <Button className="mt-4" onClick={startAnalysis} disabled={analyzing}>
+                    <Brain className="h-4 w-4 mr-2" />{analyzing ? "Analyzing…" : "Run Analysis"}
+                  </Button>
                 </CardContent>
               </Card>
-            </div>
+            )}
           </TabsContent>
 
           <TabsContent value="risks" className="space-y-4">
@@ -503,103 +523,99 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
                 <CardTitle>Risk Assessment</CardTitle>
               </CardHeader>
               <CardContent>
-                <div className="overflow-x-auto">
-                  <table className="w-full">
-                    <thead>
-                      <tr className="border-b text-left text-sm text-muted-foreground">
-                        <th className="pb-2">Risk Factor</th>
-                        <th className="pb-2">Category</th>
-                        <th className="pb-2">Severity</th>
-                        <th className="pb-2">Probability</th>
-                        <th className="pb-2">Impact</th>
-                        <th className="pb-2">Mitigation</th>
-                      </tr>
-                    </thead>
-                    <tbody className="text-sm">
-                      {[
-                        { risk: "Customer Concentration", cat: "Financial", sev: "HIGH", prob: "70%", impact: "80%", mit: "Diversify customer base" },
-                        { risk: "Competitive Threat", cat: "Market", sev: "HIGH", prob: "65%", impact: "75%", mit: "Invest in differentiation" },
-                        { risk: "Key Person Risk", cat: "Operational", sev: "MODERATE", prob: "40%", impact: "70%", mit: "Succession planning" },
-                        { risk: "Regulatory Changes", cat: "Regulatory", sev: "MODERATE", prob: "35%", impact: "60%", mit: "Compliance monitoring" },
-                        { risk: "Lockup Expiration", cat: "Post-IPO", sev: "MODERATE", prob: "90%", impact: "50%", mit: "Staggered release" },
-                      ].map((r, i) => (
-                        <tr key={i} className="border-b last:border-0">
-                          <td className="py-3 font-medium">{r.risk}</td>
-                          <td className="py-3">{r.cat}</td>
-                          <td className="py-3"><Badge variant={r.sev === "HIGH" ? "destructive" : "secondary"}>{r.sev}</Badge></td>
-                          <td className="py-3">{r.prob}</td>
-                          <td className="py-3">{r.impact}</td>
-                          <td className="py-3 text-sm text-muted-foreground">{r.mit}</td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
+                {hasAnalysis && analysis.key_risks.length > 0 ? (
+                  <div className="space-y-3">
+                    {analysis.key_risks.map((risk, i) => (
+                      <div key={i} className="flex items-start gap-3 p-3 rounded-lg bg-muted/50">
+                        <AlertTriangle className="h-4 w-4 mt-0.5 text-yellow-500 shrink-0" />
+                        <span className="text-sm">{risk}</span>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <div className="py-12 text-center">
+                    <Shield className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
+                    <h3 className="text-lg font-medium">No risk assessment available</h3>
+                    <p className="text-sm text-muted-foreground max-w-md mx-auto mt-2">
+                      Run an analysis for {symbol} to surface key risks and mitigations identified by the AI agents.
+                    </p>
+                    <Button className="mt-4" variant="outline" onClick={startAnalysis} disabled={analyzing}>
+                      <Brain className="h-4 w-4 mr-2" />{analyzing ? "Analyzing…" : "Run Analysis"}
+                    </Button>
+                  </div>
+                )}
               </CardContent>
             </Card>
           </TabsContent>
 
           <TabsContent value="sentiment" className="space-y-4">
-            <div className="grid gap-6 md:grid-cols-3">
-              <Card>
-                <CardHeader>
-                  <CardTitle>Composite Sentiment</CardTitle>
-                </CardHeader>
-                <CardContent className="text-center py-8">
-                  <div className="text-6xl font-bold text-green-600">+0.34</div>
-                  <p className="text-sm text-muted-foreground mt-2">Moderately Positive</p>
-                  <div className="mt-4 flex justify-center gap-4 text-sm">
-                    <span>Confidence: 82%</span>
-                    <span>Articles: 147</span>
-                  </div>
-                </CardContent>
-              </Card>
-              <Card>
-                <CardHeader>
-                  <CardTitle>Source Breakdown</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  {[
-                    { source: "Financial News", score: 0.42, count: 52, weight: 30 },
-                    { source: "Analyst Reports", score: 0.58, count: 18, weight: 25 },
-                    { source: "Social Media", score: 0.15, count: 89, weight: 20 },
-                    { source: "Alternative Data", score: 0.38, count: 12, weight: 15 },
-                    { source: "Institutional", score: 0.65, count: 8, weight: 10 },
-                  ].map((s, i) => (
-                    <div key={i} className="flex items-center justify-between">
-                      <span className="text-sm">{s.source}</span>
-                      <div className="flex items-center gap-2">
-                        <Progress value={(s.score + 1) * 50} className="w-32 h-2" />
-                        <span className="text-sm font-medium">{s.score > 0 ? "+" : ""}{s.score.toFixed(2)}</span>
-                      </div>
+            {hasAnalysis && analysis.sentiment_score !== null ? (
+              <div className="grid gap-6 md:grid-cols-3">
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Composite Sentiment</CardTitle>
+                  </CardHeader>
+                  <CardContent className="text-center py-8">
+                    <div className={`text-6xl font-bold ${analysis.sentiment_score >= 0 ? "text-green-600" : "text-red-600"}`}>
+                      {analysis.sentiment_score > 0 ? "+" : ""}{analysis.sentiment_score.toFixed(2)}
                     </div>
-                  ))}
-                </CardContent>
-              </Card>
+                    <p className="text-sm text-muted-foreground mt-2">{analysis.sentiment || "Neutral"}</p>
+                    {analysis.confidence !== null && (
+                      <p className="text-sm text-muted-foreground mt-4">Confidence: {Math.round(analysis.confidence * 100)}%</p>
+                    )}
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Sentiment Drivers</CardTitle>
+                  </CardHeader>
+                  <CardContent>
+                    {analysis.sentiment_drivers.length > 0 ? (
+                      <ul className="space-y-3">
+                        {analysis.sentiment_drivers.map((driver, i) => (
+                          <li key={i} className="flex items-center gap-2 p-2 rounded-lg bg-muted/50 text-sm">
+                            {driver}
+                          </li>
+                        ))}
+                      </ul>
+                    ) : (
+                      <p className="text-sm text-muted-foreground">Sentiment drivers were not recorded.</p>
+                    )}
+                  </CardContent>
+                </Card>
+                <Card>
+                  <CardHeader>
+                    <CardTitle>Score Breakdown</CardTitle>
+                  </CardHeader>
+                  <CardContent className="space-y-3">
+                    {breakdownItems.length > 0 ? (
+                      breakdownItems.map((item) => (
+                        <div key={item.key} className="flex items-center justify-between">
+                          <span className="text-sm">{item.label}</span>
+                          <span className="text-sm font-medium">{item.score}/100</span>
+                        </div>
+                      ))
+                    ) : (
+                      <p className="text-sm text-muted-foreground">No score breakdown recorded.</p>
+                    )}
+                  </CardContent>
+                </Card>
+              </div>
+            ) : (
               <Card>
-                <CardHeader>
-                  <CardTitle>Key Themes</CardTitle>
-                </CardHeader>
-                <CardContent className="space-y-3">
-                  <div className="p-3 rounded-lg bg-green-50">
-                    <p className="font-medium text-green-800">Positive</p>
-                    <ul className="mt-1 space-y-1 text-sm text-green-700">
-                      <li>• Strong earnings momentum</li>
-                      <li>• AI/ML differentiation praised</li>
-                      <li>• Management credibility high</li>
-                    </ul>
-                  </div>
-                  <div className="p-3 rounded-lg bg-red-50">
-                    <p className="font-medium text-red-800">Negative</p>
-                    <ul className="mt-1 space-y-1 text-sm text-red-700">
-                      <li>• Valuation concerns</li>
-                      <li>• Competitive intensity</li>
-                      <li>• Lockup overhang</li>
-                    </ul>
-                  </div>
+                <CardContent className="py-16 text-center">
+                  <TrendingUp className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
+                  <h3 className="text-lg font-medium">No sentiment data available</h3>
+                  <p className="text-sm text-muted-foreground max-w-md mx-auto mt-2">
+                    Sentiment analysis is produced by the analysis pipeline. Run an analysis for {symbol} to
+                    collect news, social and analyst sentiment.
+                  </p>
+                  <Button className="mt-4" variant="outline" onClick={startAnalysis} disabled={analyzing}>
+                    <Brain className="h-4 w-4 mr-2" />{analyzing ? "Analyzing…" : "Run Analysis"}
+                  </Button>
                 </CardContent>
               </Card>
-            </div>
+            )}
           </TabsContent>
 
           <TabsContent value="report" className="space-y-6">

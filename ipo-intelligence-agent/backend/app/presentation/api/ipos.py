@@ -40,6 +40,12 @@ async def get_company_repo():
         yield SQLCompanyRepository(session)
 
 
+async def get_financial_repo():
+    from app.infrastructure.repositories.sql_repositories import SQLFinancialRepository
+    async with get_db_session() as session:
+        yield SQLFinancialRepository(session)
+
+
 async def get_discover_use_case():
     async with get_db_session() as session:
         yield DiscoverIPOsUseCase(SQLIPORepository(session), SQLCompanyRepository(session))
@@ -159,6 +165,33 @@ class IPORResponse(BaseModel):
     lead_underwriter: str = ""
 
 
+class FinancialPeriodResponse(BaseModel):
+    period: Optional[str] = None
+    period_end: Optional[datetime] = None
+    revenue: Optional[float] = None
+    revenue_growth_yoy: Optional[float] = None
+    gross_profit: Optional[float] = None
+    gross_margin: Optional[float] = None
+    operating_income: Optional[float] = None
+    operating_margin: Optional[float] = None
+    net_income: Optional[float] = None
+    net_margin: Optional[float] = None
+    ebitda: Optional[float] = None
+    free_cash_flow: Optional[float] = None
+    cash_and_equivalents: Optional[float] = None
+    total_debt: Optional[float] = None
+    total_equity: Optional[float] = None
+    debt_to_equity: Optional[float] = None
+    current_ratio: Optional[float] = None
+    roe: Optional[float] = None
+    roic: Optional[float] = None
+
+
+class FinancialHistoryResponse(BaseModel):
+    symbol: str
+    periods: List[FinancialPeriodResponse] = []
+
+
 class CompanyProfileResponse(BaseModel):
     legal_name: str
     common_name: str
@@ -253,6 +286,53 @@ async def search_ipos(
     """Search IPOs by symbol or company name."""
     ipos = await use_case.execute(query=q, limit=limit)
     return [_ipo_to_response(ipo) for ipo in ipos]
+
+
+@router.get("/financials/{symbol}", response_model=FinancialHistoryResponse)
+async def get_financial_history(
+    symbol: str,
+    periods: int = Query(8, ge=1, le=40),
+    financial_repo=Depends(get_financial_repo),
+):
+    """Get financial statement history for a symbol."""
+    from app.domain.value_objects.value_objects import Money, Percentage, Ratio
+
+    def amount(value):
+        return float(value.amount) if isinstance(value, Money) and value else (None if value is None else float(value))
+
+    def pct(value):
+        return float(value.to_decimal()) if isinstance(value, Percentage) and value else (None if value is None else float(value))
+
+    def ratio(value):
+        return float(value.value) if isinstance(value, Ratio) and value else (None if value is None else float(value))
+
+    metrics = await financial_repo.get_history(symbol.upper(), periods=periods)
+    periods_data = []
+    for m in metrics:
+        periods_data.append(
+            FinancialPeriodResponse(
+                period=getattr(m, "period", None),
+                period_end=m.as_of_date if hasattr(m, "as_of_date") and m.as_of_date else None,
+                revenue=amount(m.revenue),
+                revenue_growth_yoy=pct(m.revenue_growth_yoy),
+                gross_profit=amount(m.gross_profit),
+                gross_margin=pct(m.gross_margin),
+                operating_income=amount(m.operating_income),
+                operating_margin=pct(m.operating_margin),
+                net_income=amount(m.net_income),
+                net_margin=pct(m.net_margin),
+                ebitda=amount(m.ebitda),
+                free_cash_flow=amount(m.free_cash_flow),
+                cash_and_equivalents=amount(m.cash_and_equivalents),
+                total_debt=amount(m.total_debt),
+                total_equity=amount(m.total_equity),
+                debt_to_equity=ratio(m.debt_to_equity),
+                current_ratio=ratio(m.current_ratio),
+                roe=pct(m.roe),
+                roic=pct(m.roic),
+            )
+        )
+    return FinancialHistoryResponse(symbol=symbol.upper(), periods=periods_data)
 
 
 @router.get("/{symbol}", response_model=IPORResponse)

@@ -336,8 +336,8 @@ export default function FailuresPage() {
                   <CardTitle className="text-sm font-medium">Avg Time to Resolve</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div className="text-3xl font-bold text-green-500">2.3 days</div>
-                  <p className="text-xs text-muted-foreground">Median resolution time</p>
+                  <div className="text-3xl font-bold text-green-500">N/A</div>
+                  <p className="text-xs text-muted-foreground">Not tracked</p>
                 </CardContent>
               </Card>
               <Card>

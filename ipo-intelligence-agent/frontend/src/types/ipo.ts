@@ -13,6 +13,33 @@ export interface IPOResponse {
   lead_underwriter: string
 }
 
+export interface FinancialPeriod {
+  period: string
+  period_end: string | null
+  revenue: number | null
+  revenue_growth_yoy: number | null
+  gross_profit: number | null
+  gross_margin: number | null
+  operating_income: number | null
+  operating_margin: number | null
+  net_income: number | null
+  net_margin: number | null
+  ebitda: number | null
+  free_cash_flow: number | null
+  cash_and_equivalents: number | null
+  total_debt: number | null
+  total_equity: number | null
+  debt_to_equity: number | null
+  current_ratio: number | null
+  roe: number | null
+  roic: number | null
+}
+
+export interface FinancialHistoryResponse {
+  symbol: string
+  periods: FinancialPeriod[]
+}
+
 export interface CompanyProfileResponse {
   legal_name: string
   common_name: string

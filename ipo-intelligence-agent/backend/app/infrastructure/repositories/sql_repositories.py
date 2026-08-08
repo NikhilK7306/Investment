@@ -100,6 +100,23 @@ class SQLBaseRepository:
             "use the repository-specific persistence method instead."
         )
 
+    async def list_all(self, limit: int = 50) -> list:
+        """List all entities ordered by creation time (newest first).
+
+        Requires `entity_model` and `_to_entity` on the concrete subclass.
+        """
+        to_entity = getattr(self, "_to_entity", None)
+        if to_entity is None or self.entity_model is None:
+            raise NotImplementedError(
+                f"list_all() not implemented for {type(self).__name__}"
+            )
+        result = await self.session.execute(
+            select(self.entity_model)
+            .order_by(desc(self.entity_model.created_at))
+            .limit(limit)
+        )
+        return [to_entity(m) for m in result.scalars().all()]
+
     async def delete(self, entity_id: UUID) -> bool:
         if self.entity_model is None:
             raise NotImplementedError(

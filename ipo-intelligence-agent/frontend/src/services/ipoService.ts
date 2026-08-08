@@ -1,5 +1,5 @@
 import api from "./api";
-import type { IPOResponse, CompanyProfileResponse } from "../types/ipo";
+import type { IPOResponse, CompanyProfileResponse, FinancialHistoryResponse } from "../types/ipo";
 
 export interface IPOsListParams {
   limit?: number;
@@ -44,12 +44,21 @@ export const ipoService = {
     return data;
   },
 
+  async getFinancials(symbol: string): Promise<FinancialHistoryResponse> {
+    const { data } = await api.get<FinancialHistoryResponse>(
+      `/ipos/financials/${symbol}`
+    );
+    return data;
+  },
+
   async discover(params?: {
     lookahead_days?: number;
     sources?: string[];
     min_market_cap?: number;
   }): Promise<IPOResponse[]> {
-    const { data } = await api.post<IPOResponse[]>("/ipos/discover", params);
+    const { data } = await api.post<IPOResponse[]>("/ipos/discover", null, {
+      params,
+    });
     return data;
   },
 

@@ -10,7 +10,7 @@ import { Badge } from "@/components/ui/badge";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
 import { Progress } from "@/components/ui/progress";
-import { Brain, TrendingUp, TrendingDown, CheckCircle, AlertTriangle, Target, Shield, BarChart2, FileText, Sparkles, Zap, Activity, RefreshCw } from "lucide-react";
+import { Brain, FileText, RefreshCw } from "lucide-react";
 import { analysisService } from "@/services/analysisService";
 import type { JobResponse, JobStatsResponse } from "@/types/analysis";
 
@@ -84,7 +84,6 @@ export default function AnalysisPage() {
           <TabsList>
             <TabsTrigger value="recent">Recent Analyses</TabsTrigger>
             <TabsTrigger value="running">Running ({runningJobs.length})</TabsTrigger>
-            <TabsTrigger value="templates">Templates</TabsTrigger>
           </TabsList>
 
           <TabsContent value="recent" className="space-y-4">
@@ -209,44 +208,13 @@ export default function AnalysisPage() {
                           </span>
                         </div>
                       </div>
-                      <Progress value={50} className="h-2" />
+                      <Progress value={job.started_at ? 25 : 10} className="h-2" />
+                    <p className="text-xs text-muted-foreground mt-1">In progress — status: {job.status}</p>
                     </div>
                   ))}
                 </div>
               </CardContent>
             </Card>
-          </TabsContent>
-
-          <TabsContent value="templates" className="space-y-4">
-            <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-              {[
-                { name: "Standard IPO Analysis", agents: 8, duration: "~8 min", description: "Full analysis pipeline for standard IPOs" },
-                { name: "Quick Screen", agents: 4, duration: "~3 min", description: "Rapid screening for initial evaluation" },
-                { name: "Deep Dive", agents: 10, duration: "~15 min", description: "Comprehensive analysis with extended research" },
-                { name: "Sector Focus", agents: 6, duration: "~6 min", description: "Sector-specific analysis template" },
-                { name: "Risk Assessment", agents: 5, duration: "~5 min", description: "Focused risk analysis template" },
-                { name: "Sentiment Deep Dive", agents: 4, duration: "~4 min", description: "Extended sentiment and alternative data" },
-              ].map((template, i) => (
-                <Card key={i} className="hover:border-primary/50 transition-colors">
-                  <CardHeader>
-                    <CardTitle className="flex items-center gap-2">
-                      <Zap className="h-5 w-5 text-yellow-500" />
-                      {template.name}
-                    </CardTitle>
-                  </CardHeader>
-                  <CardContent className="space-y-3">
-                    <p className="text-sm text-muted-foreground">{template.description}</p>
-                    <div className="flex items-center gap-4 text-sm text-muted-foreground">
-                      <span>{template.agents} agents</span>
-                      <span>{template.duration}</span>
-                    </div>
-                    <Button className="w-full" onClick={() => router.push("/ipos")}>
-                      Run Template
-                    </Button>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
           </TabsContent>
         </Tabs>
       </div>

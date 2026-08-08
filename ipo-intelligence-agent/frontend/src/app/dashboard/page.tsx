@@ -22,6 +22,7 @@ import {
 } from "lucide-react";
 import { ipoService } from "@/services/ipoService";
 import { analysisService } from "@/services/analysisService";
+import { memoryService } from "@/services/memoryService";
 import type { IPOResponse } from "@/types/ipo";
 import type { JobStatsResponse } from "@/types/analysis";
 
@@ -29,17 +30,28 @@ export default function DashboardPage() {
   const router = useRouter();
   const [ipos, setIpos] = useState<IPOResponse[]>([]);
   const [jobStats, setJobStats] = useState<JobStatsResponse | null>(null);
+  const [memoryCounts, setMemoryCounts] = useState<{ failures: number; successes: number; lessons: number; reflections: number }>({ failures: 0, successes: 0, lessons: 0, reflections: 0 });
   const [loading, setLoading] = useState(true);
 
   const fetchData = async () => {
     setLoading(true);
     try {
-      const [iposData, statsData] = await Promise.all([
+      const [iposData, statsData, failures, successes, lessons, reflections] = await Promise.all([
         ipoService.listUpcoming({ limit: 5 }),
         analysisService.getJobStats(),
+        memoryService.getFailures(),
+        memoryService.getSuccesses(),
+        memoryService.getLessons(),
+        memoryService.getReflections(),
       ]);
       setIpos(iposData);
       setJobStats(statsData);
+      setMemoryCounts({
+        failures: failures.length,
+        successes: successes.length,
+        lessons: lessons.length,
+        reflections: reflections.length,
+      });
     } catch (err) {
       console.error("Dashboard fetch error:", err);
     } finally {
@@ -54,29 +66,31 @@ export default function DashboardPage() {
   const metrics = [
     {
       title: "Upcoming IPOs",
-      value: String(ipos.length || 24),
-      change: `${ipos.length} upcoming`,
+      value: String(ipos.length),
+      change: `${ipos.length} tracked`,
       changeType: "positive" as const,
       icon: "calendar",
     },
     {
       title: "Active Analyses",
-      value: String(jobStats?.total_running ?? 12),
+      value: String(jobStats?.total_running ?? 0),
       change: `${jobStats?.total_pending ?? 0} pending`,
       changeType: "positive" as const,
       icon: "bar-chart",
     },
     {
       title: "Total Completed",
-      value: String(jobStats?.total_completed ?? 892),
-      change: `${jobStats?.total_failed ?? 0} failed`,
+      value: String(jobStats?.total_completed ?? 0),
+      change: jobStats && jobStats.total_failed > 0 ? `${jobStats.total_failed} failed` : "0 failed",
       changeType: jobStats && jobStats.total_failed > 0 ? "negative" as const : "positive" as const,
       icon: "target",
     },
     {
-      title: "Prediction Accuracy",
-      value: `${jobStats?.total_completed ? Math.round((jobStats.total_completed / (jobStats.total_completed + jobStats.total_failed + jobStats.total_pending)) * 100) : 78}%`,
-      change: "based on completed jobs",
+      title: "Task Success Rate",
+      value: jobStats && jobStats.total_completed + jobStats.total_failed > 0
+        ? `${Math.round((jobStats.total_completed / (jobStats.total_completed + jobStats.total_failed)) * 100)}%`
+        : "—",
+      change: "completed jobs only",
       changeType: "neutral" as const,
       icon: "check-circle",
     },
@@ -96,12 +110,13 @@ export default function DashboardPage() {
   ];
 
   const systemStats = {
-    totalIPOs: ipos.length || 1247,
-    completedAnalyses: jobStats?.total_completed ?? 892,
+    totalIPOs: ipos.length,
+    completedAnalyses: jobStats?.total_completed ?? 0,
     avgProcessingTime: "N/A",
-    memoryEntries: 15420,
-    lessonsLearned: 342,
-    reflectionAccuracy: 78.5,
+    failures: memoryCounts.failures,
+    successes: memoryCounts.successes,
+    lessons: memoryCounts.lessons,
+    reflections: memoryCounts.reflections,
   };
 
   return (
@@ -216,7 +231,7 @@ export default function DashboardPage() {
             </CardHeader>
             <CardContent className="space-y-4">
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Total IPOs Tracked</span>
+                <span className="text-muted-foreground">Upcoming IPOs</span>
                 <span className="font-bold text-2xl">{systemStats.totalIPOs.toLocaleString()}</span>
               </div>
               <div className="flex items-center justify-between">
@@ -224,20 +239,20 @@ export default function DashboardPage() {
                 <span className="font-bold text-2xl">{systemStats.completedAnalyses.toLocaleString()}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Avg Processing Time</span>
-                <span className="font-bold text-2xl">{systemStats.avgProcessingTime}</span>
+                <span className="text-muted-foreground">Failures</span>
+                <span className="font-bold text-2xl">{systemStats.failures}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Memory Entries</span>
-                <span className="font-bold text-2xl">{systemStats.memoryEntries.toLocaleString()}</span>
+                <span className="text-muted-foreground">Successes</span>
+                <span className="font-bold text-2xl">{systemStats.successes}</span>
               </div>
               <div className="flex items-center justify-between">
                 <span className="text-muted-foreground">Lessons Learned</span>
-                <span className="font-bold text-2xl">{systemStats.lessonsLearned}</span>
+                <span className="font-bold text-2xl">{systemStats.lessons}</span>
               </div>
               <div className="flex items-center justify-between">
-                <span className="text-muted-foreground">Reflection Accuracy</span>
-                <span className="font-bold text-2xl text-green-600">{systemStats.reflectionAccuracy}%</span>
+                <span className="text-muted-foreground">Reflections</span>
+                <span className="font-bold text-2xl">{systemStats.reflections}</span>
               </div>
             </CardContent>
           </Card>
