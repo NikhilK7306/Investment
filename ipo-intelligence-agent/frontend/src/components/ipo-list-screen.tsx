@@ -263,7 +263,9 @@ export default function IPOListScreen({
                               </div>
                             </TableCell>
                             <TableCell>
-                              <Badge variant="outline" className="text-xs">{ipo.exchange}</Badge>
+                              <Badge variant="outline" className="text-xs">
+                                {ipo.exchange === "OTHER" ? "Other" : ipo.exchange}
+                              </Badge>
                             </TableCell>
                             <TableCell>
                               <Badge variant="secondary" className="text-xs">{ipo.sector || "N/A"}</Badge>

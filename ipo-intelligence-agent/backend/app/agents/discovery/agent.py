@@ -31,7 +31,7 @@ class DiscoveryAgent(BaseAgent[Dict[str, Any], List[IPODetails]]):
         self._sources = {
             "nasdaq": "https://www.nasdaq.com/market-activity/ipos",
             "nyse": "https://www.nyse.com/ipo-center",
-            "sec": "https://www.sec.gov/cgi-bin/browse-edgar",
+            "sec": "https://efts.sec.gov/LATEST/search-index",
             "ipowatch": "https://www.ipowatch.com/upcoming-ipos/",
             "renaissance": "https://www.renaissancecapital.com/ipo-calendar",
             "investorgain": "https://www.investorgain.com/report/ipo-gmp-live/331/all/",
@@ -273,12 +273,54 @@ Return structured data for each IPO found. Be thorough but avoid duplicates."""
             return None
     
     async def _fetch_sec_filings(self, lookahead_days: int) -> List[IPODetails]:
-        """Fetch IPOs from SEC EDGAR filings (S-1, F-1)."""
+        """Fetch IPOs from SEC EDGAR full-text search (recent S-1/F-1 filings)."""
         ipos = []
         try:
-            # This would use SEC EDGAR API or scraping
-            # For now, return empty list - would be implemented with sec-edgar-downloader
-            pass
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                response = await client.get(
+                    "https://efts.sec.gov/LATEST/search-index",
+                    params={
+                        "q": '"S-1" OR "F-1"',
+                        "forms": "S-1,F-1",
+                        "dateRange": "m",
+                    },
+                    headers={"User-Agent": "IPO Intelligence Research dev@example.com"},
+                )
+                if response.status_code != 200:
+                    return ipos
+                data = response.json()
+                hits = data.get("hits", {}).get("hits", []) or []
+                cutoff = datetime.utcnow() - timedelta(days=lookahead_days)
+                for hit in hits:
+                    src = hit.get("_source", {})
+                    if not isinstance(src, dict):
+                        continue
+                    form = str(src.get("form", ""))
+                    root_form = form.split("/")[0]
+                    if root_form not in ("S-1", "F-1"):
+                        continue
+                    file_date = self._parse_date(src.get("file_date"))
+                    if not file_date or file_date < cutoff:
+                        continue
+                    display_names = src.get("display_names") or []
+                    if not display_names:
+                        continue
+                    name = str(display_names[0]).split(" (CIK")[0].strip()
+                    ticker_match = re.search(r"\(\s*([A-Z0-9]{1,12})(?:[,\s/]|\))", name)
+                    symbol = (ticker_match.group(1) if ticker_match else self._to_symbol(name)).upper()
+                    name = re.sub(r"\s*\([^)]*[A-Z0-9][^)]*\)\s*$", "", name).strip()
+                    if not symbol or symbol in self._seen_symbols:
+                        continue
+                    self._seen_symbols.add(symbol)
+                    ipos.append(IPODetails(
+                        symbol=symbol,
+                        company_name=name,
+                        exchange=Exchange.OTHER,
+                        expected_date=file_date,
+                        status=IPOStatus.FILED.value,
+                        sector=Sector.UNCLASSIFIED,
+                        industry=Industry.OTHER,
+                    ))
         except Exception as e:
             raise AgentError(f"SEC fetch failed: {e}", self.name.value)
         return ipos
