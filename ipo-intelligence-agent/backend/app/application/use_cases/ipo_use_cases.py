@@ -134,7 +134,7 @@ def _sanitize_report(value: Any) -> Any:
 class DiscoverIPOsUseCase:
     """Use case for discovering IPOs."""
 
-    DEFAULT_SOURCES = ["nasdaq", "nyse", "sec", "renaissance", "investorgain"]
+    DEFAULT_SOURCES = ["nasdaq", "sec", "investorgain"]
 
     def __init__(
         self,

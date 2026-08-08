@@ -473,6 +473,14 @@ class SuccessMemoryRepository(MemoryRepository):
         pass
     
     @abstractmethod
+    async def get_by_success_id(
+        self,
+        success_id: str,
+    ) -> Optional[SuccessMemory]:
+        """Get success by its stable success_id."""
+        pass
+
+    @abstractmethod
     async def increment_reuse_count(
         self,
         success_id: UUID,

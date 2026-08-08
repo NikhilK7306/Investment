@@ -1,6 +1,7 @@
 """API router for Memory & Reflection systems."""
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Body, Depends, HTTPException, Query, status
+from sqlalchemy.exc import IntegrityError
 from typing import List, Optional, Dict, Any
 from uuid import UUID
 from datetime import datetime
@@ -465,7 +466,7 @@ async def cleanup_memory(
 ):
     """Clean up old memory entries."""
     counts = await use_case.execute(memory_type=memory_type, older_than_days=older_than_days)
-    return counts
+    return counts if isinstance(counts, dict) else {"deleted": counts}
 
 
 # Failure Memory Endpoints
@@ -509,15 +510,15 @@ async def search_failures(
     return [
         FailureResponse(
             failure_id=f[0].failure_id,
-            agent_name=f[0].agent_name.value,
+            agent_name=getattr(f[0].agent_name, "value", f[0].agent_name),
             error_type=f[0].error_type,
             error_message=f[0].error_message,
             root_cause=f[0].root_cause,
             attempted_fix=f[0].attempted_fix,
             resolved=f[0].resolved,
             resolution=f[0].resolution,
-            category=f[0].category.value,
-            severity=f[0].severity.value,
+            category=getattr(f[0].category, "value", f[0].category),
+            severity=getattr(f[0].severity, "value", f[0].severity),
             occurrences=f[0].occurrences,
             last_occurrence=f[0].last_occurrence,
             ipo_symbol=f[0].metadata.get("ipo_symbol") if f[0].metadata else None,
@@ -537,15 +538,15 @@ async def get_failures_by_category(
     return [
         FailureResponse(
             failure_id=f.failure_id,
-            agent_name=f.agent_name.value,
+            agent_name=getattr(f.agent_name, "value", f.agent_name),
             error_type=f.error_type,
             error_message=f.error_message,
             root_cause=f.root_cause,
             attempted_fix=f.attempted_fix,
             resolved=f.resolved,
             resolution=f.resolution,
-            category=f.category.value,
-            severity=f.severity.value,
+            category=getattr(f.category, "value", f.category),
+            severity=getattr(f.severity, "value", f.severity),
             occurrences=f.occurrences,
             last_occurrence=f.last_occurrence,
             ipo_symbol=f.metadata.get("ipo_symbol") if f.metadata else None,
@@ -576,15 +577,15 @@ async def get_unresolved_failures(
     return [
         FailureResponse(
             failure_id=f.failure_id,
-            agent_name=f.agent_name.value,
+            agent_name=getattr(f.agent_name, "value", f.agent_name),
             error_type=f.error_type,
             error_message=f.error_message,
             root_cause=f.root_cause,
             attempted_fix=f.attempted_fix,
             resolved=f.resolved,
             resolution=f.resolution,
-            category=f.category.value,
-            severity=f.severity.value,
+            category=getattr(f.category, "value", f.category),
+            severity=getattr(f.severity, "value", f.severity),
             occurrences=f.occurrences,
             last_occurrence=f.last_occurrence,
             ipo_symbol=f.metadata.get("ipo_symbol") if f.metadata else None,
@@ -684,12 +685,14 @@ async def list_successes(
 
 @router.post("/successes/{success_id}/reuse", response_model=Dict[str, bool])
 async def increment_success_reuse(
-    success_id: UUID,
-    use_case: IncrementSuccessReuseUseCase = Depends(get_increment_success_reuse_use_case),
+    success_id: str,
+    repo: SQLSuccessMemoryRepository = Depends(get_success_repo),
 ):
     """Increment success reuse count."""
-    success = await use_case.execute(success_id=success_id)
-    return {"success": success}
+    success = await repo.get_by_success_id(success_id)
+    if not success:
+        raise HTTPException(status_code=404, detail="Success memory not found")
+    return {"success": await repo.increment_reuse_count(success.id)}
 
 
 # Knowledge Memory Endpoints
@@ -741,7 +744,7 @@ async def get_knowledge_by_concept(
 
 @router.post("/knowledge/search", response_model=List[KnowledgeResponse])
 async def search_knowledge(
-    query_embedding: List[float],
+    query_embedding: List[float] = Body(..., embed=True),
     limit: int = Query(10, ge=1, le=50),
     threshold: float = Query(0.7, ge=0.0, le=1.0),
     use_case: SearchKnowledgeUseCase = Depends(get_search_knowledge_use_case),
@@ -893,21 +896,27 @@ async def record_reflection(
     use_case: RecordReflectionUseCase = Depends(get_record_reflection_use_case),
 ):
     """Record a reflection after outcome verification."""
-    reflection = await use_case.execute(
-        prediction_id=request.prediction_id,
-        ipo_symbol=request.ipo_symbol,
-        prediction_type=request.prediction_type,
-        predicted_value=request.predicted_value,
-        actual_value=request.actual_value,
-        accuracy=request.accuracy,
-        mistakes_identified=request.mistakes_identified,
-        correct_assumptions=request.correct_assumptions,
-        missing_factors=request.missing_factors,
-        lessons_extracted=request.lessons_extracted,
-        prompt_improvements=request.prompt_improvements,
-        strategy_changes=request.strategy_changes,
-        knowledge_updates=request.knowledge_updates,
-    )
+    try:
+        reflection = await use_case.execute(
+            prediction_id=request.prediction_id,
+            ipo_symbol=request.ipo_symbol,
+            prediction_type=request.prediction_type,
+            predicted_value=request.predicted_value,
+            actual_value=request.actual_value,
+            accuracy=request.accuracy,
+            mistakes_identified=request.mistakes_identified,
+            correct_assumptions=request.correct_assumptions,
+            missing_factors=request.missing_factors,
+            lessons_extracted=request.lessons_extracted,
+            prompt_improvements=request.prompt_improvements,
+            strategy_changes=request.strategy_changes,
+            knowledge_updates=request.knowledge_updates,
+        )
+    except IntegrityError as exc:
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid prediction_id: prediction does not exist",
+        ) from exc
     return ReflectionResponse(reflection_id=str(reflection.id), recorded=True)
 
 

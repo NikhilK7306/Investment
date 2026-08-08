@@ -21,7 +21,7 @@ from sqlalchemy import (
     ARRAY,
     func,
 )
-from sqlalchemy.dialects.postgresql import UUID as PGUUID, JSONB
+from sqlalchemy.dialects.postgresql import UUID as PGUUID, JSONB, ARRAY as PG_ARRAY
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from pgvector.sqlalchemy import Vector
 
@@ -581,7 +581,7 @@ class LessonModel(Base):
     prompt_improvements: Mapped[List[str]] = mapped_column(ARRAY(String), default=list)
     confidence: Mapped[float] = mapped_column(default=0.0)
     evidence: Mapped[List[Dict[str, Any]]] = mapped_column(JSONB, default=list)
-    applicable_agents: Mapped[List[AgentName]] = mapped_column(ARRAY(SQLEnum(AgentName)), default=list)
+    applicable_agents: Mapped[List[AgentName]] = mapped_column(PG_ARRAY(SQLEnum(AgentName)), default=list)
     tags: Mapped[List[str]] = mapped_column(ARRAY(String), default=list)
     version: Mapped[int] = mapped_column(Integer, default=1)
     supersedes: Mapped[Optional[UUID]] = mapped_column(PGUUID(as_uuid=True))

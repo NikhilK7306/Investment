@@ -291,8 +291,17 @@ class RecordSuccessUseCase:
             json.dumps(context or {}, sort_keys=True).encode()
         ).hexdigest()[:16]
 
+        success_id = f"{agent_name.value}_{context_hash}"
+
+        # Idempotent re-record: bump reuse count instead of duplicating
+        existing = await self.success_repo.get_by_success_id(success_id)
+        if existing:
+            await self.success_repo.increment_reuse_count(existing.id)
+            existing.reuse_count += 1
+            return existing
+
         success = SuccessMemory(
-            success_id=f"{agent_name.value}_{context_hash}",
+            success_id=success_id,
             agent_name=agent_name,
             strategy_description=strategy_description,
             prompt_used=prompt_used,

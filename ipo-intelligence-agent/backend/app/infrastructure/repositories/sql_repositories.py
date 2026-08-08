@@ -1286,6 +1286,8 @@ class SQLMemoryRepository(MemoryRepository):
             model = ExperienceMemoryModel(
                 ipo_symbol=ipo_symbol or "",
                 situation_description=str(content),
+                prediction_made=content.get("prediction", "") or "",
+                actual_outcome=content.get("outcome", "") or "",
                 metadata=metadata or {},
             )
 
@@ -1330,7 +1332,22 @@ class SQLMemoryRepository(MemoryRepository):
         older_than_days: int,
     ) -> int:
         """Delete old memory entries."""
-        return 0
+        model_map = {
+            MemoryType.EXPERIENCE: ExperienceMemoryModel,
+            MemoryType.FAILURE: FailureMemoryModel,
+            MemoryType.SUCCESS: SuccessMemoryModel,
+            MemoryType.KNOWLEDGE: KnowledgeMemoryModel,
+            MemoryType.BEST_PRACTICE: BestPracticeMemoryModel,
+            MemoryType.REFLECTION: ReflectionMemoryModel,
+        }
+        model_cls = model_map.get(memory_type)
+        if model_cls is None:
+            return 0
+        cutoff = datetime.utcnow() - timedelta(days=older_than_days)
+        result = await self.session.execute(
+            delete(model_cls).where(model_cls.created_at < cutoff)
+        )
+        return result.rowcount or 0
 
 
 class SQLFailureMemoryRepository(SQLBaseRepository, FailureMemoryRepository):
@@ -1450,7 +1467,7 @@ class SQLFailureMemoryRepository(SQLBaseRepository, FailureMemoryRepository):
             id=model.id,
             memory_type=MemoryType.FAILURE.value,
             content=model.error_message,
-            metadata=model.metadata,
+            metadata=model.extra_data,
             created_at=model.created_at,
             failure_id=model.failure_id,
             agent_name=model.agent_name,
@@ -1555,6 +1572,14 @@ class SQLSuccessMemoryRepository(SQLBaseRepository, SuccessMemoryRepository):
         models = result.scalars().all()
         return [self._to_entity(m) for m in models]
 
+    async def get_by_success_id(self, success_id: str) -> Optional[SuccessMemory]:
+        """Get success by its stable success_id."""
+        result = await self.session.execute(
+            select(SuccessMemoryModel).where(SuccessMemoryModel.success_id == success_id)
+        )
+        model = result.scalar_one_or_none()
+        return self._to_entity(model) if model else None
+
     async def increment_reuse_count(self, success_id: UUID) -> bool:
         """Increment reuse count."""
         result = await self.session.execute(
@@ -1573,7 +1598,7 @@ class SQLSuccessMemoryRepository(SQLBaseRepository, SuccessMemoryRepository):
             id=model.id,
             memory_type=MemoryType.SUCCESS.value,
             content=model.strategy_description,
-            metadata=model.metadata,
+            metadata=model.extra_data,
             created_at=model.created_at,
             success_id=model.success_id,
             agent_name=model.agent_name,
@@ -1783,9 +1808,8 @@ class SQLReflectionMemoryRepository(SQLBaseRepository, ReflectionMemoryRepositor
             predicted_value=cp.get("predicted_value", 0.0),
             actual_value=cp.get("actual_value", 0.0),
 accuracy=cp.get("accuracy", 0.0),
-            lessons_extracted=[cp.get("lesson_learned", "")] if cp.get("lesson_learned") else [],
+lessons_extracted=[cp.get("lesson_learned", "")] if cp.get("lesson_learned") else [],
             processed=bool(cp.get("processed", False)),
-            extra_data={**(metadata or {}), **cp},
         )
         self.session.add(model)
         await self.session.flush()
@@ -1882,7 +1906,7 @@ class SQLLessonRepository(SQLBaseRepository, LessonRepository):
             tags=lesson.tags,
             version=lesson.version,
             supersedes=lesson.supersedes,
-            metadata=lesson.metadata or {},
+            extra_data={**(getattr(lesson, "metadata", None) or {}), **(getattr(lesson, "extra_data", None) or {})},
         )
         self.session.add(model)
         await self.session.flush()

@@ -8,7 +8,7 @@ export default function ForeignIPOsPage() {
       region="foreign"
       regionLabel="Foreign"
       description="Discover and analyze international IPOs (NASDAQ, NYSE, LSE, and more)"
-      discoverSources={["nasdaq", "nyse", "sec", "renaissance"]}
+      discoverSources={["nasdaq", "sec"]}
     />
   );
 }

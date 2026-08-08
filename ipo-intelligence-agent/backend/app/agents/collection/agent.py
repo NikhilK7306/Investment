@@ -201,7 +201,9 @@ Return structured, validated data with source attribution and confidence scores.
 
         # Try SEC EDGAR for pre-IPO companies
         if not financials["statements"]:
-            financials["sec_filings"] = await self._fetch_sec_filings(symbol)
+            financials["sec_filings"] = await self._fetch_sec_filings(
+                symbol, str(ipo_details.get("company_name", ""))
+            )
 
         return financials
 
@@ -341,54 +343,116 @@ Return structured, validated data with source attribution and confidence scores.
 
         return ratios
 
-    async def _fetch_sec_filings(self, symbol: str) -> List[Dict]:
+    async def _fetch_sec_filings(self, symbol: str, company_name: str = "") -> List[Dict]:
         """Fetch recent SEC filings for pre-IPO companies from EDGAR."""
+        headers = {
+            "User-Agent": "IPO Intelligence Research dev@example.com",
+        }
         try:
-            headers = {
-                "User-Agent": "IPO Intelligence Research dev@example.com",
-            }
             async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-                tickers_resp = await client.get(
-                    "https://www.sec.gov/files/company_tickers.json", headers=headers
-                )
-                if tickers_resp.status_code != 200:
-                    return []
                 cik = None
-                for entry in tickers_resp.json().values():
-                    if str(entry.get("ticker", "")).upper() == symbol.upper():
-                        cik = entry.get("cik_str")
-                        break
-                if not cik:
-                    return []
-                sub_resp = await client.get(
-                    f"https://data.sec.gov/submissions/CIK{str(cik).zfill(10)}.json",
-                    headers=headers,
-                )
-                if sub_resp.status_code != 200:
-                    return []
-                data = sub_resp.json()
-                recent = data.get("filings", {}).get("recent", {})
-                forms = recent.get("form", []) or []
-                accessions = recent.get("accessionNumber", []) or []
-                filing_dates = recent.get("filingDate", []) or []
-                primary_docs = recent.get("primaryDocument", []) or []
-                filings = []
-                for i, form in enumerate(forms):
-                    if form not in ("S-1", "S-1A", "F-1", "F-1A", "10-K", "10-Q", "8-K"):
-                        continue
-                    accession = accessions[i] if i < len(accessions) else ""
-                    acc_no = accession.replace("-", "")
-                    primary = primary_docs[i] if i < len(primary_docs) else ""
-                    filings.append({
-                        "filing_type": form,
-                        "date": filing_dates[i] if i < len(filing_dates) else "",
-                        "url": f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_no}/{primary}",
-                    })
-                    if len(filings) >= 10:
-                        break
-                return filings
+                try:
+                    tickers_resp = await client.get(
+                        "https://www.sec.gov/files/company_tickers.json", headers=headers
+                    )
+                    if tickers_resp.status_code == 200:
+                        for entry in tickers_resp.json().values():
+                            if str(entry.get("ticker", "")).upper() == symbol.upper():
+                                cik = entry.get("cik_str")
+                                break
+                except Exception:
+                    pass
+                if cik:
+                    return await self._sec_filings_by_cik(client, headers, cik)
+                if company_name:
+                    return await self._sec_filings_by_name(client, headers, company_name)
+                return []
         except Exception:
             return []
+
+    async def _sec_filings_by_cik(
+        self,
+        client: httpx.AsyncClient,
+        headers: Dict[str, str],
+        cik: int,
+    ) -> List[Dict]:
+        sub_resp = await client.get(
+            f"https://data.sec.gov/submissions/CIK{str(cik).zfill(10)}.json",
+            headers=headers,
+        )
+        if sub_resp.status_code != 200:
+            return []
+        data = sub_resp.json()
+        recent = data.get("filings", {}).get("recent", {})
+        forms = recent.get("form", []) or []
+        accessions = recent.get("accessionNumber", []) or []
+        filing_dates = recent.get("filingDate", []) or []
+        primary_docs = recent.get("primaryDocument", []) or []
+        filings = []
+        for i, form in enumerate(forms):
+            if form not in ("S-1", "S-1A", "F-1", "F-1A", "10-K", "10-Q", "8-K"):
+                continue
+            accession = accessions[i] if i < len(accessions) else ""
+            acc_no = accession.replace("-", "")
+            primary = primary_docs[i] if i < len(primary_docs) else ""
+            filings.append({
+                "filing_type": form,
+                "date": filing_dates[i] if i < len(filing_dates) else "",
+                "url": f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_no}/{primary}",
+            })
+            if len(filings) >= 10:
+                break
+        return filings
+
+    async def _sec_filings_by_name(
+        self,
+        client: httpx.AsyncClient,
+        headers: Dict[str, str],
+        company_name: str,
+    ) -> List[Dict]:
+        """Search EDGAR full-text index for the company's IPO filings by name."""
+        response = await client.get(
+            "https://efts.sec.gov/LATEST/search-index",
+            params={
+                "q": f'"{company_name}"',
+                "forms": "S-1,F-1,10-K,10-Q,8-K",
+                "dateRange": "y",
+            },
+            headers=headers,
+        )
+        if response.status_code != 200:
+            return []
+        hits = response.json().get("hits", {}).get("hits", []) or []
+        allowed = ("S-1", "F-1", "10-K", "10-Q", "8-K")
+        filings = []
+        seen = set()
+        for hit in hits:
+            src = hit.get("_source", {}) or {}
+            display = src.get("display_names") or []
+            if not display or company_name.lower() not in str(display[0]).lower():
+                continue
+            base_form = str(src.get("form", "")).split("/")[0]
+            if base_form not in allowed:
+                continue
+            filing_date = src.get("file_date", "")
+            dedupe_key = (base_form, filing_date)
+            if dedupe_key in seen:
+                continue
+            seen.add(dedupe_key)
+            ciks = src.get("ciks") or []
+            adsh = str(src.get("adsh", "")).replace("-", "")
+            url = (
+                f"https://www.sec.gov/Archives/edgar/data/{ciks[0]}/{adsh}/"
+                if ciks and adsh else ""
+            )
+            filings.append({
+                "filing_type": base_form,
+                "date": src.get("file_date", ""),
+                "url": url,
+            })
+            if len(filings) >= 10:
+                break
+        return filings
 
     async def _collect_company_profile(
         self,

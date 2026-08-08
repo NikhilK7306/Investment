@@ -57,6 +57,7 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("overview");
   const [analyzing, setAnalyzing] = useState(false);
+  const [analyzeError, setAnalyzeError] = useState<string | null>(null);
 
   useEffect(() => {
     const fetch = async () => {
@@ -137,11 +138,24 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
 
   const startAnalysis = async () => {
     setAnalyzing(true);
+    setAnalyzeError(null);
     try {
-      await analysisService.analyze(symbol);
+      const result = await analysisService.analyze(symbol);
+      if (result?.error) {
+        setAnalyzeError(
+          typeof result.error === "string" ? result.error : "Analysis failed"
+        );
+        return;
+      }
       router.push(`/ipos/${symbol}`);
     } catch (err) {
-      console.error("Failed to start analysis:", err);
+      const message =
+        typeof (err as { response?: { data?: { detail?: string } } })?.response
+          ?.data?.detail === "string"
+          ? (err as { response?: { data?: { detail?: string } } }).response!.data!
+              .detail!
+          : "Analysis failed. Check the IPO symbol and try again.";
+      setAnalyzeError(message);
     } finally {
       setAnalyzing(false);
     }
@@ -167,10 +181,22 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
               <FileText className="h-4 w-4 mr-2" />Download Report
             </Button>
             <Button onClick={startAnalysis} disabled={analyzing}>
-              <Brain className="h-4 w-4 mr-2" />{analyzing ? "Analyzing…" : "Re-run Analysis"}
+              <Brain className="h-4 w-4 mr-2" />
+              {analyzing
+                ? "Analyzing…"
+                : hasAnalysis
+                ? "Re-run Analysis"
+                : "Run Analysis"}
             </Button>
           </div>
         </div>
+
+        {analyzeError && (
+          <div className="flex items-center gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-4 py-3 text-sm text-destructive">
+            <AlertTriangle className="h-4 w-4" />
+            {analyzeError}
+          </div>
+        )}
 
         {/* Score Cards */}
         <div className="grid gap-4 md:grid-cols-4">
