@@ -9,6 +9,8 @@ export interface IPOsListParams {
   sector?: string;
   from_date?: string;
   to_date?: string;
+  region?: "india" | "foreign";
+  phase?: "upcoming" | "current" | "listed";
 }
 
 export interface IPOsSearchParams {

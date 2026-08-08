@@ -76,8 +76,15 @@ class IPORepository(IORepository):
         sector: Optional[Sector] = None,
         from_date: Optional[datetime] = None,
         to_date: Optional[datetime] = None,
+        region: Optional[str] = None,
+        phase: Optional[str] = None,
     ) -> List[IPODetails]:
-        """List upcoming IPOs with filters."""
+        """List upcoming IPOs with filters.
+
+        region: "india" (NSE/BSE) or "foreign" (all others).
+        phase: "upcoming" (not yet open), "current" (bidding started,
+        not listed), or "listed" (already listed).
+        """
         pass
     
     @abstractmethod

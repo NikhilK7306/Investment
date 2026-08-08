@@ -4,7 +4,7 @@ from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import UUID
 
-from sqlalchemy import select, func, and_, or_, desc, delete
+from sqlalchemy import select, func, and_, or_, not_, desc, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -166,6 +166,8 @@ class SQLIPORepository(IPORepository):
         sector: Optional[Sector] = None,
         from_date: Optional[datetime] = None,
         to_date: Optional[datetime] = None,
+        region: Optional[str] = None,
+        phase: Optional[str] = None,
     ) -> List[IPODetails]:
         """List upcoming IPOs."""
         query = select(IPOModel)
@@ -177,6 +179,30 @@ class SQLIPORepository(IPORepository):
             conditions.append(IPOModel.exchange == exchange)
         if sector:
             conditions.append(IPOModel.sector == sector)
+
+        if region == "india":
+            conditions.append(IPOModel.exchange.in_([Exchange.NSE, Exchange.BSE]))
+        elif region == "foreign":
+            conditions.append(IPOModel.exchange.notin_([Exchange.NSE, Exchange.BSE]))
+
+        if phase:
+            now = datetime.utcnow()
+            day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+            day_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
+            listed = or_(
+                IPOModel.status == IPOStatus.LISTED,
+                and_(IPOModel.listed_date.isnot(None), IPOModel.listed_date < day_start),
+            )
+            if phase == "upcoming":
+                conditions.append(not_(listed))
+                conditions.append(or_(IPOModel.expected_date.is_(None), IPOModel.expected_date > day_end))
+            elif phase == "current":
+                conditions.append(not_(listed))
+                conditions.append(IPOModel.expected_date.isnot(None))
+                conditions.append(IPOModel.expected_date <= day_end)
+            elif phase == "listed":
+                conditions.append(listed)
+
         if from_date:
             conditions.append(IPOModel.expected_date >= from_date)
         if to_date:
@@ -265,25 +291,26 @@ class SQLIPORepository(IPORepository):
 
     def _to_entity(self, model: IPOModel) -> IPODetails:
         """Convert model to entity."""
+        currency = "INR" if model.exchange in (Exchange.NSE, Exchange.BSE) else "USD"
         price_range = None
         if model.expected_price_low is not None and model.expected_price_high is not None:
             price_range = PriceRange(
-                low=Money(model.expected_price_low, "USD"),
-                high=Money(model.expected_price_high, "USD"),
+                low=Money(model.expected_price_low, currency),
+                high=Money(model.expected_price_high, currency),
             )
         elif model.expected_price_low is not None:
             price_range = PriceRange(
-                low=Money(model.expected_price_low, "USD"),
-                high=Money(model.expected_price_low, "USD"),
+                low=Money(model.expected_price_low, currency),
+                high=Money(model.expected_price_low, currency),
             )
 
-        offer_price = Money(model.priced_price, "USD") if model.priced_price is not None else None
+        offer_price = Money(model.priced_price, currency) if model.priced_price is not None else None
 
         valuation = None
         if model.priced_valuation is not None:
             valuation = Valuation(
-                enterprise_value=Money(model.priced_valuation, "USD"),
-                equity_value=Money(model.priced_valuation, "USD"),
+                enterprise_value=Money(model.priced_valuation, currency),
+                equity_value=Money(model.priced_valuation, currency),
                 price_per_share=model.priced_price or 0,
                 shares_outstanding=model.shares_offered or 0,
             )

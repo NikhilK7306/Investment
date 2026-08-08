@@ -6,6 +6,7 @@ import { useRouter, usePathname } from "next/navigation";
 import {
   LayoutDashboard,
   Calendar,
+  TrendingUp,
   FileText,
   BarChart2,
   Brain,
@@ -28,7 +29,8 @@ import { useTheme } from "next-themes";
 
 const navigation = [
   { name: "Dashboard", href: "/dashboard", icon: LayoutDashboard },
-  { name: "Upcoming IPOs", href: "/ipos", icon: Calendar },
+  { name: "Indian IPOs", href: "/ipos/india", icon: Calendar },
+  { name: "Foreign IPOs", href: "/ipos/foreign", icon: TrendingUp },
   { name: "Analysis", href: "/analysis", icon: BarChart2 },
   { name: "Reports", href: "/reports", icon: FileText },
   { name: "Memory", href: "/memory", icon: Brain },

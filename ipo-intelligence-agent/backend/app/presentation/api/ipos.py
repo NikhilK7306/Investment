@@ -209,9 +209,16 @@ async def list_upcoming_ipos(
     sector: Optional[Sector] = Query(None),
     from_date: Optional[datetime] = Query(None),
     to_date: Optional[datetime] = Query(None),
+    region: Optional[str] = Query(None, pattern="^(india|foreign)$"),
+    phase: Optional[str] = Query(None, pattern="^(upcoming|current|listed)$"),
     use_case: ListUpcomingIPOsUseCase = Depends(get_list_use_case),
 ):
-    """List upcoming IPOs with filters."""
+    """List upcoming IPOs with filters.
+
+    - region: "india" (NSE/BSE) or "foreign" (all other exchanges)
+    - phase: "upcoming" (not yet open), "current" (bidding started, not
+      yet listed), or "listed" (already listed)
+    """
     ipos = await use_case.execute(
         limit=limit,
         offset=offset,
@@ -220,6 +227,8 @@ async def list_upcoming_ipos(
         sector=sector,
         from_date=from_date,
         to_date=to_date,
+        region=region,
+        phase=phase,
     )
     return [_ipo_to_response(ipo) for ipo in ipos]
 

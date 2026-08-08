@@ -127,6 +127,8 @@ class GetUpcomingIPOsUseCase:
         sector: Optional[Sector] = None,
         from_date: Optional[datetime] = None,
         to_date: Optional[datetime] = None,
+        region: Optional[str] = None,
+        phase: Optional[str] = None,
     ) -> List[IPODetails]:
         """Get upcoming IPOs with filters."""
         return await self.ipo_repo.list_upcoming(
@@ -137,6 +139,8 @@ class GetUpcomingIPOsUseCase:
             sector=sector,
             from_date=from_date,
             to_date=to_date,
+            region=region,
+            phase=phase,
         )
 
 
