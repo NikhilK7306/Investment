@@ -168,18 +168,18 @@ def get_job_stats_use_case(job_repo=Depends(get_job_repo)) -> GetJobStatsUseCase
 
 # Request/Response Models
 class AnalysisRequest(BaseModel):
-    symbol: str = Field(..., min_length=1, max_length=10, pattern="^[A-Z0-9.]+$")
+    symbol: str = Field(..., min_length=1, max_length=30, pattern="^[A-Z0-9.]+$")
     depth: str = Field("standard", pattern="^(standard|deep|comprehensive)$")
     user_id: Optional[str] = None
 
 
 class DataCollectionRequest(BaseModel):
-    symbol: str = Field(..., min_length=1, max_length=10)
+    symbol: str = Field(..., min_length=1, max_length=30)
     ipo_details: Dict[str, Any] = {}
 
 
 class ReportRequest(BaseModel):
-    symbol: str = Field(..., min_length=1, max_length=10)
+    symbol: str = Field(..., min_length=1, max_length=30)
     analysis_results: Dict[str, Any]
 
 
@@ -229,15 +229,49 @@ class AnalysisResponse(BaseModel):
     bear_case: Optional[str] = None
     key_risks: List[str] = []
     key_catalysts: List[str] = []
-    agent_results: Dict[str, Any] = {}
+    score_breakdown: Dict[str, float] = {}
+    agent_results: Any = {}
     completed_at: Optional[datetime] = None
     error: Optional[str] = None
+
+
+def _analysis_to_response(result, symbol: str) -> AnalysisResponse:
+    """Build API response from either an OverallAnalysis entity or stored dict."""
+    expr = lambda key, default=None: (
+        result.get(key, default) if isinstance(result, dict) else getattr(result, key, default)
+    )
+
+    def enum_str(value):
+        return value.value if hasattr(value, "value") else (value or None)
+
+    agent_results = expr("agent_results", {})
+    if hasattr(agent_results, "__dataclass_fields__"):
+        from dataclasses import asdict
+        agent_results = asdict(agent_results)
+
+    return AnalysisResponse(
+        job_id=str(expr("id") or expr("analysis_id")),
+        symbol=symbol,
+        status=enum_str(expr("status")) or "unknown",
+        overall_score=expr("overall_score"),
+        confidence=expr("confidence"),
+        recommendation=enum_str(expr("investment_strategy")),
+        risk_level=enum_str(expr("risk_level")),
+        time_horizon=enum_str(expr("time_horizon")),
+        bull_case=expr("bull_case"),
+        bear_case=expr("bear_case"),
+        key_risks=expr("key_risks", []) or [],
+        key_catalysts=expr("key_catalysts", []) or [],
+        score_breakdown=expr("score_breakdown", {}) or {},
+        agent_results=agent_results,
+        completed_at=expr("completed_at"),
+        error=expr("error"),
+    )
 
 
 @router.post("/analyze", response_model=AnalysisResponse, status_code=status.HTTP_202_ACCEPTED)
 async def analyze_ipo(
     request: AnalysisRequest,
-    background_tasks: BackgroundTasks,
     use_case: AnalyzeIPOUseCase = Depends(get_analyze_use_case),
 ):
     """Start full IPO analysis pipeline."""
@@ -247,14 +281,10 @@ async def analyze_ipo(
         user_id=request.user_id,
     )
 
-    if "error" in result:
+    if isinstance(result, dict) and result.get("error"):
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
 
-    return AnalysisResponse(
-        job_id=result["job_id"],
-        symbol=request.symbol.upper(),
-        status="pending",
-    )
+    return _analysis_to_response(result, request.symbol.upper())
 
 
 @router.post("/collect", response_model=AnalysisResponse, status_code=status.HTTP_202_ACCEPTED)
@@ -385,9 +415,11 @@ async def get_analysis_result(
     use_case: GetAnalysisUseCase = Depends(get_get_analysis_use_case),
 ):
     """Get latest analysis result for symbol."""
-    analysis = await use_case.execute(symbol.upper())
+    analysis = await use_case.get_latest(symbol.upper())
     if not analysis:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail=f"Analysis not found: {symbol}")
+
+    return _analysis_to_response(analysis, symbol.upper())
 
     return AnalysisResponse(
         job_id=analysis.get("id", ""),
@@ -414,23 +446,5 @@ async def get_analysis_history(
     use_case: GetAnalysisUseCase = Depends(get_get_analysis_use_case),
 ):
     """Get analysis history for symbol."""
-    history = await use_case.execute(symbol.upper(), limit=limit)
-    return [
-        AnalysisResponse(
-            job_id=h.get("id", ""),
-            symbol=symbol.upper(),
-            status=h.get("status", "unknown"),
-            overall_score=h.get("overall_score"),
-            confidence=h.get("confidence"),
-            recommendation=h.get("investment_strategy"),
-            risk_level=h.get("risk_level"),
-            time_horizon=h.get("time_horizon"),
-            bull_case=h.get("bull_case"),
-            bear_case=h.get("bear_case"),
-            key_risks=h.get("key_risks", []),
-            key_catalysts=h.get("key_catalysts", []),
-            agent_results=h.get("agent_results", {}),
-            completed_at=h.get("completed_at"),
-        )
-        for h in history
-    ]
+    history = await use_case.get_history(symbol.upper(), limit=limit)
+    return [_analysis_to_response(h, symbol.upper()) for h in history]

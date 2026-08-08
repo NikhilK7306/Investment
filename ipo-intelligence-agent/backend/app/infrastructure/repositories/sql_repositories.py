@@ -2,7 +2,7 @@
 
 from datetime import datetime, timedelta
 from typing import Any, Dict, List, Optional, Tuple
-from uuid import UUID
+from uuid import UUID, uuid4
 
 from sqlalchemy import select, func, and_, or_, not_, desc, delete
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -38,6 +38,13 @@ from app.domain.enums.enums import (
     LessonType,
     JobType,
     JobStatus,
+    FailureCategory,
+    Severity,
+    AnalysisStatus,
+    InvestmentStrategy,
+    TimeHorizon,
+    RiskLevel,
+    SentimentLabel,
 )
 from app.domain.entities.entities import (
     MemoryEntry,
@@ -78,6 +85,98 @@ from app.infrastructure.database.models import (
     APIKeyModel,
 )
 from app.domain.value_objects.value_objects import Money, Percentage, Ratio, PriceRange, Valuation
+
+
+class SQLBaseRepository:
+    """Default save/delete implementations for repos without dedicated persistence
+    for IORepository's generic methods. Repos with richer domain methods
+    (save_analysis, etc.) keep those and only need entity_model for delete()."""
+
+    entity_model = None
+
+    async def save(self, entity) -> None:
+        raise NotImplementedError(
+            f"save() not implemented for {type(self).__name__}; "
+            "use the repository-specific persistence method instead."
+        )
+
+    async def delete(self, entity_id: UUID) -> bool:
+        if self.entity_model is None:
+            raise NotImplementedError(
+                f"delete() not implemented for {type(self).__name__}"
+            )
+        result = await self.session.execute(
+            delete(self.entity_model).where(
+                self.entity_model.id == entity_id
+            )
+        )
+        await self.session.flush()
+        return result.rowcount > 0
+
+    async def search(
+        self,
+        memory_type: MemoryType,
+        query_embedding: List[float],
+        limit: int = 10,
+        threshold: float = 0.75,
+        filters: Optional[Dict[str, Any]] = None,
+    ) -> List[Tuple[MemoryEntry, float]]:
+        """Semantic search is not wired up for typed memory stores; the
+        concrete subclasses expose focused lookups instead."""
+        return []
+
+    async def get_by_id(
+        self,
+        memory_type: MemoryType,
+        entry_id: UUID,
+    ) -> Optional[MemoryEntry]:
+        to_entity = getattr(self, "_to_entity", None)
+        if to_entity is None or self.entity_model is None:
+            raise NotImplementedError(
+                f"get_by_id() not implemented for {type(self).__name__}"
+            )
+        result = await self.session.execute(
+            select(self.entity_model).where(self.entity_model.id == entry_id)
+        )
+        model = result.scalar_one_or_none()
+        return to_entity(model) if model else None
+
+    async def get_recent(
+        self,
+        memory_type: MemoryType,
+        limit: int = 100,
+        ipo_symbol: Optional[str] = None,
+    ) -> List[MemoryEntry]:
+        to_entity = getattr(self, "_to_entity", None)
+        if to_entity is None or self.entity_model is None:
+            raise NotImplementedError(
+                f"get_recent() not implemented for {type(self).__name__}"
+            )
+        model_cls = self.entity_model
+        query = select(model_cls)
+        if ipo_symbol is not None and hasattr(model_cls, "ipo_symbol"):
+            query = query.where(model_cls.ipo_symbol == ipo_symbol)
+        query = query.order_by(desc(model_cls.created_at)).limit(limit)
+        result = await self.session.execute(query)
+        return [to_entity(m) for m in result.scalars().all()]
+
+    async def delete_old_entries(
+        self,
+        memory_type: MemoryType,
+        older_than_days: int,
+    ) -> int:
+        if self.entity_model is None:
+            raise NotImplementedError(
+                f"delete_old_entries() not implemented for {type(self).__name__}"
+            )
+        cutoff = datetime.utcnow() - timedelta(days=older_than_days)
+        result = await self.session.execute(
+            delete(self.entity_model).where(
+                self.entity_model.created_at < cutoff
+            )
+        )
+        await self.session.flush()
+        return result.rowcount
 
 
 class SQLIPORepository(IPORepository):
@@ -458,8 +557,10 @@ class SQLCompanyRepository(CompanyRepository):
         )
 
 
-class SQLFinancialRepository(FinancialRepository):
+class SQLFinancialRepository(SQLBaseRepository, FinancialRepository):
     """SQL implementation of financial repository."""
+
+    entity_model = FinancialStatementModel
 
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -575,8 +676,10 @@ class SQLFinancialRepository(FinancialRepository):
         )
 
 
-class SQLAnalysisRepository(AnalysisRepository):
+class SQLAnalysisRepository(SQLBaseRepository, AnalysisRepository):
     """SQL implementation of analysis repository."""
+
+    entity_model = AnalysisModel
 
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -586,53 +689,96 @@ class SQLAnalysisRepository(AnalysisRepository):
         symbol: str,
         analysis_data: Dict[str, Any],
     ) -> UUID:
-        """Save complete analysis."""
-        # Get company
-        company_result = await self.session.execute(
-            select(CompanyModel).where(CompanyModel.ticker == symbol.upper())
-        )
-        company = company_result.scalar_one_or_none()
+        """Save complete analysis.
 
-        model = AnalysisModel(
-            company_id=company.id if company else None,
-            symbol=symbol.upper(),
-            status=analysis_data.get("status", AnalysisStatus.COMPLETED),
-            overall_score=analysis_data.get("overall_score", 0),
-            confidence=analysis_data.get("confidence", 0),
-            financial_strength_score=analysis_data.get("financial_strength_score", 0),
-            growth_potential_score=analysis_data.get("growth_potential_score", 0),
-            market_opportunity_score=analysis_data.get("market_opportunity_score", 0),
-            management_quality_score=analysis_data.get("management_quality_score", 0),
-            risk_level_score=analysis_data.get("risk_level_score", 0),
-            score_breakdown=analysis_data.get("score_breakdown", {}),
-            bull_case=analysis_data.get("bull_case", ""),
-            bear_case=analysis_data.get("bear_case", ""),
-            key_risks=analysis_data.get("key_risks", []),
-            key_catalysts=analysis_data.get("key_catalysts", []),
-            investment_strategy=analysis_data.get("investment_strategy", InvestmentStrategy.WATCH),
-            time_horizon=analysis_data.get("time_horizon", TimeHorizon.MEDIUM_TERM),
-            risk_level=analysis_data.get("risk_level", RiskLevel.MODERATE),
-            risk_factors=analysis_data.get("risk_factors", []),
-            sentiment=analysis_data.get("sentiment", SentimentLabel.NEUTRAL),
-            sentiment_score=analysis_data.get("sentiment_score", 0),
-            sentiment_drivers=analysis_data.get("sentiment_drivers", []),
-            agent_results=analysis_data.get("agent_results", {}),
-            model_version=analysis_data.get("model_version", "1.0.0"),
+        An in-flight RUNNING analysis for the symbol is updated in place so a
+        single analysis run produces a single row; otherwise a new row is
+        created. The ipo symbol is stored on the joined ipos row."""
+        sym = symbol.upper()
+        ipo_result = await self.session.execute(
+            select(IPOModel).where(IPOModel.symbol == sym)
         )
-        self.session.add(model)
+        ipo = ipo_result.scalar_one_or_none()
+        if not ipo:
+            raise ValueError(f"IPO not found for symbol: {sym}")
+
+        pending_row = (
+            await self.session.execute(
+                select(AnalysisModel)
+                .where(
+                    and_(
+                        AnalysisModel.ipo_id == ipo.id,
+                        AnalysisModel.status == AnalysisStatus.RUNNING,
+                    )
+                )
+                .order_by(desc(AnalysisModel.created_at))
+                .limit(1)
+            )
+        ).scalar_one_or_none()
+
+        if pending_row is not None:
+            model = pending_row
+        else:
+            model = AnalysisModel(
+                ipo_id=ipo.id,
+                company_id=ipo.company_id,
+                extra_data={"symbol": sym},
+            )
+            self.session.add(model)
+
+        fields_map = {
+            "status": analysis_data.get("status"),
+            "overall_score": analysis_data.get("overall_score"),
+            "confidence": analysis_data.get("confidence"),
+            "financial_strength_score": analysis_data.get("financial_strength_score"),
+            "growth_potential_score": analysis_data.get("growth_potential_score"),
+            "market_opportunity_score": analysis_data.get("market_opportunity_score"),
+            "management_quality_score": analysis_data.get("management_quality_score"),
+            "risk_level_score": analysis_data.get("risk_level_score"),
+            "score_breakdown": analysis_data.get("score_breakdown"),
+            "bull_case": analysis_data.get("bull_case"),
+            "bear_case": analysis_data.get("bear_case"),
+            "key_risks": analysis_data.get("key_risks"),
+            "key_catalysts": analysis_data.get("key_catalysts"),
+            "investment_strategy": analysis_data.get("investment_strategy"),
+            "time_horizon": analysis_data.get("time_horizon"),
+            "risk_level": analysis_data.get("risk_level"),
+            "sentiment": analysis_data.get("sentiment"),
+            "sentiment_score": analysis_data.get("sentiment_score"),
+            "sentiment_drivers": analysis_data.get("sentiment_drivers"),
+            "agent_results": analysis_data.get("agent_results"),
+            "model_version": analysis_data.get("model_version"),
+            "completed_at": analysis_data.get("completed_at"),
+        }
+        for field, value in fields_map.items():
+            if value is not None:
+                setattr(model, field, value)
+        if analysis_data.get("metadata"):
+            model.extra_data = {**model.extra_data, **analysis_data["metadata"]}
+
         await self.session.flush()
         return model.id
+
+    def _select_with_symbol(self, symbol: str):
+        """Statement joining analyses with their IPO symbol."""
+        return (
+            select(AnalysisModel, IPOModel.symbol)
+            .join(IPOModel, AnalysisModel.ipo_id == IPOModel.id)
+            .where(IPOModel.symbol == symbol.upper())
+        )
 
     async def get_latest_analysis(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Get latest analysis for symbol."""
         result = await self.session.execute(
-            select(AnalysisModel)
-            .where(AnalysisModel.symbol == symbol.upper())
+            self._select_with_symbol(symbol)
             .order_by(desc(AnalysisModel.created_at))
             .limit(1)
         )
-        model = result.scalar_one_or_none()
-        return self._to_dict(model) if model else None
+        row = result.first()
+        if not row:
+            return None
+        model, symbol_value = row
+        return self._to_dict(model, symbol=symbol_value)
 
     async def get_analysis_history(
         self,
@@ -641,13 +787,12 @@ class SQLAnalysisRepository(AnalysisRepository):
     ) -> List[Dict[str, Any]]:
         """Get analysis history."""
         result = await self.session.execute(
-            select(AnalysisModel)
-            .where(AnalysisModel.symbol == symbol.upper())
+            self._select_with_symbol(symbol)
             .order_by(desc(AnalysisModel.created_at))
             .limit(limit)
         )
-        models = result.scalars().all()
-        return [self._to_dict(m) for m in models]
+        rows = result.all()
+        return [self._to_dict(m, symbol=s) for m, s in rows]
 
     async def get_analysis_by_id(self, analysis_id: UUID) -> Optional[Dict[str, Any]]:
         """Get analysis by ID."""
@@ -655,7 +800,17 @@ class SQLAnalysisRepository(AnalysisRepository):
             select(AnalysisModel).where(AnalysisModel.id == analysis_id)
         )
         model = result.scalar_one_or_none()
-        return self._to_dict(model) if model else None
+        if not model:
+            return None
+        symbol = (model.extra_data or {}).get("symbol")
+        if symbol:
+            symbol_row = await self.session.execute(
+                select(IPOModel.symbol).where(IPOModel.id == model.ipo_id)
+            )
+            symbol_row = symbol_row.scalar_one_or_none()
+            if symbol_row:
+                symbol = symbol_row
+        return self._to_dict(model, symbol=symbol)
 
     async def save_score_breakdown(
         self,
@@ -736,11 +891,11 @@ class SQLAnalysisRepository(AnalysisRepository):
             )
         return None
 
-    def _to_dict(self, model: AnalysisModel) -> Dict[str, Any]:
+    def _to_dict(self, model: AnalysisModel, symbol: Optional[str] = None) -> Dict[str, Any]:
         """Convert model to dictionary."""
         return {
             "id": str(model.id),
-            "symbol": model.symbol,
+            "symbol": symbol or (model.extra_data or {}).get("symbol", ""),
             "status": model.status.value if hasattr(model.status, 'value') else model.status,
             "overall_score": model.overall_score,
             "confidence": model.confidence,
@@ -767,8 +922,10 @@ class SQLAnalysisRepository(AnalysisRepository):
         }
 
 
-class SQLPredictionRepository(PredictionRepository):
+class SQLPredictionRepository(SQLBaseRepository, PredictionRepository):
     """SQL implementation of prediction repository."""
+
+    entity_model = PredictionModel
 
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -851,8 +1008,10 @@ class SQLPredictionRepository(PredictionRepository):
         )
 
 
-class SQLReportRepository(ReportRepository):
+class SQLReportRepository(SQLBaseRepository, ReportRepository):
     """SQL implementation of report repository."""
+
+    entity_model = ReportModel
 
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -1058,11 +1217,44 @@ class SQLMemoryRepository(MemoryRepository):
         return 0
 
 
-class SQLFailureMemoryRepository(FailureMemoryRepository):
+class SQLFailureMemoryRepository(SQLBaseRepository, FailureMemoryRepository):
     """SQL implementation of failure memory repository."""
+
+    entity_model = FailureMemoryModel
 
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    async def store(
+        self,
+        memory_type: MemoryType,
+        content: Dict[str, Any],
+        embedding: Optional[List[float]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        ipo_symbol: Optional[str] = None,
+        analysis_id: Optional[UUID] = None,
+    ) -> UUID:
+        """Store failure memory entry."""
+        cp = content if isinstance(content, dict) else {"content": content}
+        model = FailureMemoryModel(
+            failure_id=str(cp.get("failure_id") or f"failure-{uuid4().hex[:32]}"),
+            agent_name=cp.get("agent_name", AgentName.DISCOVERY),
+            error_type=cp.get("error_type") or "UnknownError",
+            error_message=cp.get("error_message") or cp.get("message") or str(content),
+            stack_trace=cp.get("stack_trace", ""),
+            root_cause=cp.get("root_cause", ""),
+            attempted_fix=cp.get("attempted_fix", ""),
+            category=cp.get("category", FailureCategory.UNKNOWN),
+            severity=cp.get("severity", Severity.MEDIUM),
+            similarity_hash=cp.get("similarity_hash")
+            or hashlib.md5(str(content).encode()).hexdigest()[:16],
+            ipo_symbol=ipo_symbol,
+            analysis_id=analysis_id,
+            extra_data={**(metadata or {}), **cp},
+        )
+        self.session.add(model)
+        await self.session.flush()
+        return model.id
 
     async def find_similar(
         self,
@@ -1162,11 +1354,42 @@ class SQLFailureMemoryRepository(FailureMemoryRepository):
         )
 
 
-class SQLSuccessMemoryRepository(SuccessMemoryRepository):
+class SQLSuccessMemoryRepository(SQLBaseRepository, SuccessMemoryRepository):
     """SQL implementation of success memory repository."""
+
+    entity_model = SuccessMemoryModel
 
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    async def store(
+        self,
+        memory_type: MemoryType,
+        content: Dict[str, Any],
+        embedding: Optional[List[float]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        ipo_symbol: Optional[str] = None,
+        analysis_id: Optional[UUID] = None,
+    ) -> UUID:
+        """Store success memory entry."""
+        cp = content if isinstance(content, dict) else {"content": content}
+        model = SuccessMemoryModel(
+            success_id=str(cp.get("success_id") or f"success-{uuid4().hex[:32]}"),
+            agent_name=cp.get("agent_name", AgentName.DECISION),
+            strategy_description=cp.get("strategy_description") or cp.get("strategy") or str(content),
+            prompt_used=cp.get("prompt_used", ""),
+            tool_sequence=cp.get("tool_sequence", []),
+            api_sequence=cp.get("api_sequence", []),
+            confidence=cp.get("confidence", 0.0),
+            context_hash=cp.get("context_hash")
+            or hashlib.md5(str(content).encode()).hexdigest()[:16],
+            ipo_symbol=ipo_symbol,
+            analysis_id=analysis_id,
+            extra_data={**(metadata or {}), **cp},
+        )
+        self.session.add(model)
+        await self.session.flush()
+        return model.id
 
     async def find_successful_strategies(
         self,
@@ -1250,11 +1473,37 @@ class SQLSuccessMemoryRepository(SuccessMemoryRepository):
         )
 
 
-class SQLKnowledgeMemoryRepository(KnowledgeMemoryRepository):
+class SQLKnowledgeMemoryRepository(SQLBaseRepository, KnowledgeMemoryRepository):
     """SQL implementation of knowledge memory repository."""
+
+    entity_model = KnowledgeMemoryModel
 
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    async def store(
+        self,
+        memory_type: MemoryType,
+        content: Dict[str, Any],
+        embedding: Optional[List[float]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        ipo_symbol: Optional[str] = None,
+        analysis_id: Optional[UUID] = None,
+    ) -> UUID:
+        """Store knowledge memory entry."""
+        cp = content if isinstance(content, dict) else {"detail": content}
+        model = KnowledgeMemoryModel(
+            concept=str(cp.get("concept") or f"concept-{uuid4().hex[:12]}"),
+            description=cp.get("description") or cp.get("detail") or str(content),
+            evidence=cp.get("evidence", []),
+            confidence=cp.get("confidence", 0.0),
+            domain=str(cp.get("domain") or "general"),
+            tags=cp.get("tags", []),
+            extra_data={**(metadata or {}), **cp},
+        )
+        self.session.add(model)
+        await self.session.flush()
+        return model.id
 
     async def get_by_concept(
         self,
@@ -1313,11 +1562,35 @@ class SQLKnowledgeMemoryRepository(KnowledgeMemoryRepository):
         )
 
 
-class SQLBestPracticeRepository(BestPracticeRepository):
+class SQLBestPracticeRepository(SQLBaseRepository, BestPracticeRepository):
     """SQL implementation of best practice repository."""
+
+    entity_model = BestPracticeMemoryModel
 
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    async def store(
+        self,
+        memory_type: MemoryType,
+        content: Dict[str, Any],
+        embedding: Optional[List[float]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        ipo_symbol: Optional[str] = None,
+        analysis_id: Optional[UUID] = None,
+    ) -> UUID:
+        """Store best practice memory entry."""
+        cp = content if isinstance(content, dict) else {"detail": content}
+        model = BestPracticeMemoryModel(
+            practice_name=str(cp.get("practice_name") or cp.get("name") or f"practice-{uuid4().hex[:12]}"),
+            description=cp.get("description") or cp.get("detail") or str(content),
+            applicable_context=cp.get("applicable_context", {}),
+            tags=cp.get("tags", []),
+            extra_data={**(metadata or {}), **cp},
+        )
+        self.session.add(model)
+        await self.session.flush()
+        return model.id
 
     async def get_applicable_practices(
         self,
@@ -1368,11 +1641,39 @@ class SQLBestPracticeRepository(BestPracticeRepository):
         )
 
 
-class SQLReflectionMemoryRepository(ReflectionMemoryRepository):
+class SQLReflectionMemoryRepository(SQLBaseRepository, ReflectionMemoryRepository):
     """SQL implementation of reflection memory repository."""
+
+    entity_model = ReflectionMemoryModel
 
     def __init__(self, session: AsyncSession):
         self.session = session
+
+    async def store(
+        self,
+        memory_type: MemoryType,
+        content: Dict[str, Any],
+        embedding: Optional[List[float]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        ipo_symbol: Optional[str] = None,
+        analysis_id: Optional[UUID] = None,
+    ) -> UUID:
+        """Store reflection memory entry."""
+        cp = content if isinstance(content, dict) else {"detail": content}
+        model = ReflectionMemoryModel(
+            prediction_id=UUID(str(cp.get("prediction_id") or uuid4())),
+            ipo_symbol=str(cp.get("ipo_symbol") or ipo_symbol or "UNKNOWN"),
+            prediction_type=cp.get("prediction_type", PredictionType.PRICE_CHANGE_1M),
+            predicted_value=cp.get("predicted_value", 0.0),
+            actual_value=cp.get("actual_value", 0.0),
+accuracy=cp.get("accuracy", 0.0),
+            lessons_extracted=[cp.get("lesson_learned", "")] if cp.get("lesson_learned") else [],
+            processed=bool(cp.get("processed", False)),
+            extra_data={**(metadata or {}), **cp},
+        )
+        self.session.add(model)
+        await self.session.flush()
+        return model.id
 
     async def get_by_prediction(
         self,
@@ -1437,8 +1738,12 @@ class SQLReflectionMemoryRepository(ReflectionMemoryRepository):
         )
 
 
-class SQLLessonRepository(LessonRepository):
+class SQLLessonRepository(SQLBaseRepository, LessonRepository):
     """SQL implementation of lesson repository."""
+
+    entity_model = LessonModel
+
+    entity_model = LessonModel
 
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -1678,8 +1983,10 @@ class SQLJobRepository(JobRepository):
         return stats
 
 
-class SQLUserRepository(UserRepository):
+class SQLUserRepository(SQLBaseRepository, UserRepository):
     """SQL implementation of user repository."""
+
+    entity_model = UserModel
 
     def __init__(self, session: AsyncSession):
         self.session = session
@@ -1759,8 +2066,10 @@ class SQLUserRepository(UserRepository):
         return False
 
 
-class SQLAPIKeyRepository(APIKeyRepository):
+class SQLAPIKeyRepository(SQLBaseRepository, APIKeyRepository):
     """SQL implementation of API key repository."""
+
+    entity_model = APIKeyModel
 
     def __init__(self, session: AsyncSession):
         self.session = session

@@ -34,6 +34,8 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
   const [ipo, setIpo] = useState<IPOResponse | null>(null);
   const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
   const [loading, setLoading] = useState(true);
+  const [activeTab, setActiveTab] = useState("overview");
+  const [analyzing, setAnalyzing] = useState(false);
 
   useEffect(() => {
     const fetch = async () => {
@@ -69,11 +71,50 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
   const ipoSector = ipo?.sector || "N/A";
   const ipoIndustry = ipo?.industry || "N/A";
   const ipoExpectedDate = ipo?.expected_date ? new Date(ipo.expected_date).toLocaleDateString() : "TBD";
-  const ipoPriceRange = ipo?.price_range ? `$${ipo.price_range.low} - $${ipo.price_range.high}` : "N/A";
-  const overallScore = analysis?.overall_score ?? 78;
+  const isIndian = ipo?.exchange === "NSE" || ipo?.exchange === "BSE";
+  const currency = isIndian ? "₹" : "$";
+  const ipoPriceRange = ipo?.price_range ? `${currency}${ipo.price_range.low} - ${currency}${ipo.price_range.high}` : "N/A";
+  const overallScore = analysis?.overall_score ?? null;
   const recommendation = analysis?.recommendation ?? "N/A";
-  const riskLevel = analysis?.risk_level ?? "MODERATE";
-  const confidence = analysis?.confidence ?? 0.75;
+  const riskLevel = analysis?.risk_level ?? "N/A";
+  const confidence = analysis?.confidence ?? null;
+  const timeHorizon = analysis?.time_horizon ?? "N/A";
+  const hasAnalysis = !!analysis && analysis.status === "completed";
+  const breakdownItems = hasAnalysis && analysis.score_breakdown
+    ? Object.entries(analysis.score_breakdown).map(([key, score]) => ({
+        key,
+        label: key
+          .split("_")
+          .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+          .join(" "),
+        score,
+      }))
+    : [];
+  const demoRisks = [
+    { risk: "High customer concentration (top 3 = 45% revenue)", severity: "high" },
+    { risk: "Intense competition from MSFT, GOOGL", severity: "moderate" },
+    { risk: "Key person dependency on CEO", severity: "moderate" },
+    { risk: "Regulatory uncertainty in data privacy", severity: "low" },
+  ];
+  const demoBreakdown = [
+    { label: "Financial Strength", score: 85 },
+    { label: "Growth Potential", score: 78 },
+    { label: "Market Opportunity", score: 82 },
+    { label: "Management Quality", score: 88 },
+    { label: "Risk Level (inv.)", score: 75 },
+  ];
+
+  const startAnalysis = async () => {
+    setAnalyzing(true);
+    try {
+      await analysisService.analyze(symbol);
+      router.push(`/ipos/${symbol}`);
+    } catch (err) {
+      console.error("Failed to start analysis:", err);
+    } finally {
+      setAnalyzing(false);
+    }
+  };
 
   return (
     <div className="min-h-screen bg-background">
@@ -91,18 +132,11 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
             <p className="text-muted-foreground">{ipoSector} / {ipoIndustry}</p>
           </div>
           <div className="flex items-center gap-4">
-            <Button variant="outline" onClick={() => router.push(`/reports/${symbol}`)}>
+            <Button variant="outline" onClick={() => setActiveTab("report")}>
               <FileText className="h-4 w-4 mr-2" />Download Report
             </Button>
-            <Button onClick={async () => {
-              try {
-                await analysisService.analyze(symbol);
-                router.push(`/analysis?symbol=${symbol}`);
-              } catch (err) {
-                console.error("Failed to start analysis:", err);
-              }
-            }}>
-              <Brain className="h-4 w-4 mr-2" />Re-run Analysis
+            <Button onClick={startAnalysis} disabled={analyzing}>
+              <Brain className="h-4 w-4 mr-2" />{analyzing ? "Analyzing…" : "Re-run Analysis"}
             </Button>
           </div>
         </div>
@@ -114,25 +148,25 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
               <div className="flex items-center justify-between">
                 <div>
                   <p className="text-sm text-muted-foreground">Overall Score</p>
-                  <p className="text-4xl font-bold">{overallScore}/100</p>
+                  <p className="text-4xl font-bold">{overallScore ?? "--"}{overallScore ? "/100" : ""}</p>
                 </div>
                 <Target className="h-12 w-12 text-primary/20" />
               </div>
-              <Progress value={overallScore} className="mt-4 h-2" />
+              <Progress value={overallScore ?? 0} className="mt-4 h-2" />
             </CardContent>
           </Card>
           <Card>
             <CardContent className="p-6">
               <p className="text-sm text-muted-foreground">Recommendation</p>
               <p className="text-3xl font-bold text-green-600">{recommendation}</p>
-              <p className="text-sm text-muted-foreground mt-1">Confidence: {Math.round(confidence * 100)}%</p>
+              <p className="text-sm text-muted-foreground mt-1">Confidence: {confidence !== null ? `${Math.round(confidence * 100)}%` : "N/A"}</p>
             </CardContent>
           </Card>
           <Card>
             <CardContent className="p-6">
               <p className="text-sm text-muted-foreground">Risk Level</p>
               <p className="text-3xl font-bold text-yellow-600">{riskLevel}</p>
-              <p className="text-sm text-muted-foreground mt-1">Time Horizon: Medium Term</p>
+              <p className="text-sm text-muted-foreground mt-1">Time Horizon: {timeHorizon}</p>
             </CardContent>
           </Card>
           <Card>
@@ -145,7 +179,7 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
         </div>
 
         {/* Tabs */}
-        <Tabs defaultValue="overview" className="w-full">
+        <Tabs value={activeTab} onValueChange={setActiveTab} className="w-full">
           <TabsList className="grid w-full grid-cols-7">
             <TabsTrigger value="overview">Overview</TabsTrigger>
             <TabsTrigger value="financials">Financials</TabsTrigger>
@@ -165,8 +199,8 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
                   <div className="grid grid-cols-2 gap-4 text-sm">
                     <div><p className="text-muted-foreground">Price Range</p><p className="font-medium">{ipoPriceRange}</p></div>
                     <div><p className="text-muted-foreground">Shares Offered</p><p className="font-medium">{ipo?.shares_offered?.toLocaleString() || "N/A"}</p></div>
-                    <div><p className="text-muted-foreground">Valuation</p><p className="font-medium">{ipo?.valuation?.equity_value ? `$${(ipo.valuation.equity_value / 1e9).toFixed(1)}B` : "N/A"}</p></div>
-                    <div><p className="text-muted-foreground">Lead Underwriters</p><p className="font-medium">Goldman Sachs, Morgan Stanley</p></div>
+                    <div><p className="text-muted-foreground">Valuation</p><p className="font-medium">{ipo?.valuation?.equity_value ? `${currency}${(ipo.valuation.equity_value / 1e9).toFixed(1)}B` : "N/A"}</p></div>
+                    <div><p className="text-muted-foreground">Lead Underwriters</p><p className="font-medium">{ipo?.underwriters?.length ? ipo.underwriters.join(", ") : ipo?.lead_underwriter || "N/A"}</p></div>
                   </div>
                 </CardContent>
               </Card>
@@ -176,23 +210,23 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
                   <CardTitle className="flex items-center gap-2"><BarChart2 className="h-5 w-5" /> Score Breakdown</CardTitle>
                 </CardHeader>
                 <CardContent className="space-y-4">
-                  <div className="space-y-2">
-                    {[
-                      { label: "Financial Strength", score: 85, weight: 25 },
-                      { label: "Growth Potential", score: 78, weight: 25 },
-                      { label: "Market Opportunity", score: 82, weight: 20 },
-                      { label: "Management Quality", score: 88, weight: 15 },
-                      { label: "Risk Level (inv.)", score: 75, weight: 15 },
-                    ].map((item) => (
-                      <div key={item.label} className="space-y-1">
-                        <div className="flex justify-between text-sm">
-                          <span>{item.label}</span>
-                          <span className="font-medium">{item.score}/100</span>
+                  {hasAnalysis ? (
+                    <div className="space-y-2">
+                      {(breakdownItems.length > 0 ? breakdownItems : demoBreakdown).map((item) => (
+                        <div key={item.label || item.key} className="space-y-1">
+                          <div className="flex justify-between text-sm">
+                            <span>{item.label}</span>
+                            <span className="font-medium">{item.score}/100</span>
+                          </div>
+                          <Progress value={item.score} className="h-2" />
                         </div>
-                        <Progress value={item.score} className="h-2" />
-                      </div>
-                    ))}
-                  </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <p className="text-sm text-muted-foreground">
+                      No analysis available yet. Click "Re-run Analysis" above to generate a breakdown.
+                    </p>
+                  )}
                 </CardContent>
               </Card>
 
@@ -201,22 +235,28 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
                   <CardTitle className="flex items-center gap-2"><Shield className="h-5 w-5" /> Key Risks</CardTitle>
                 </CardHeader>
                 <CardContent>
-                  <div className="space-y-2">
-                    {[
-                      { risk: "High customer concentration (top 3 = 45% revenue)", severity: "high" },
-                      { risk: "Intense competition from MSFT, GOOGL", severity: "moderate" },
-                      { risk: "Key person dependency on CEO", severity: "moderate" },
-                      { risk: "Regulatory uncertainty in data privacy", severity: "low" },
-                    ].map((r, i) => (
-                      <div key={i} className="flex items-center gap-2 p-2 rounded-lg bg-muted/50">
-                        <AlertTriangle className={`h-4 w-4 ${r.severity === "high" ? "text-red-500" : r.severity === "moderate" ? "text-yellow-500" : "text-green-500"}`} />
-                        <span className="text-sm">{r.risk}</span>
-                        <Badge variant={r.severity === "high" ? "destructive" : r.severity === "moderate" ? "secondary" : "outline"} className="ml-auto">
-                          {r.severity}
-                        </Badge>
-                      </div>
-                    ))}
-                  </div>
+                  {hasAnalysis && analysis.key_risks.length > 0 ? (
+                    <div className="space-y-2">
+                      {analysis.key_risks.map((risk, i) => (
+                        <div key={i} className="flex items-center gap-2 p-2 rounded-lg bg-muted/50">
+                          <AlertTriangle className="h-4 w-4 text-yellow-500" />
+                          <span className="text-sm">{risk}</span>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="space-y-2">
+                      {demoRisks.map((r, i) => (
+                        <div key={i} className="flex items-center gap-2 p-2 rounded-lg bg-muted/50">
+                          <AlertTriangle className={`h-4 w-4 ${r.severity === "high" ? "text-red-500" : r.severity === "moderate" ? "text-yellow-500" : "text-green-500"}`} />
+                          <span className="text-sm">{r.risk}</span>
+                          <Badge variant={r.severity === "high" ? "destructive" : r.severity === "moderate" ? "secondary" : "outline"} className="ml-auto">
+                            {r.severity}
+                          </Badge>
+                        </div>
+                      ))}
+                    </div>
+                  )}
                 </CardContent>
               </Card>
             </div>
@@ -228,11 +268,17 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-2 text-sm">
-                    <p className="font-medium text-green-700">✓ Strong recurring revenue model (92% ARR)</p>
-                    <p className="font-medium text-green-700">✓ Expanding TAM with 35% CAGR</p>
-                    <p className="font-medium text-green-700">✓ Best-in-class net revenue retention (130%)</p>
-                    <p className="font-medium text-green-700">✓ Experienced management with prior exits</p>
-                    <p className="font-medium text-green-700">✓ Clear path to profitability by Q4 2025</p>
+                    {hasAnalysis && analysis.bull_case ? (
+                      <p className="font-medium text-green-700">{analysis.bull_case}</p>
+                    ) : (
+                      <>
+                        <p className="font-medium text-green-700">✓ Strong recurring revenue model (92% ARR)</p>
+                        <p className="font-medium text-green-700">✓ Expanding TAM with 35% CAGR</p>
+                        <p className="font-medium text-green-700">✓ Best-in-class net revenue retention (130%)</p>
+                        <p className="font-medium text-green-700">✓ Experienced management with prior exits</p>
+                        <p className="font-medium text-green-700">✓ Clear path to profitability by Q4 2025</p>
+                      </>
+                    )}
                   </div>
                 </CardContent>
               </Card>
@@ -243,11 +289,17 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
                 </CardHeader>
                 <CardContent>
                   <div className="space-y-2 text-sm">
-                    <p className="font-medium text-red-700">✗ High valuation at 15x forward revenue</p>
-                    <p className="font-medium text-red-700">✗ Customer concentration risk</p>
-                    <p className="font-medium text-red-700">✗ Increasing competition from well-funded rivals</p>
-                    <p className="font-medium text-red-700">✗ Path to profitability not yet proven</p>
-                    <p className="font-medium text-red-700">✗ Lockup expiration in 180 days</p>
+                    {hasAnalysis && analysis.bear_case ? (
+                      <p className="font-medium text-red-700">{analysis.bear_case}</p>
+                    ) : (
+                      <>
+                        <p className="font-medium text-red-700">✗ High valuation at 15x forward revenue</p>
+                        <p className="font-medium text-red-700">✗ Customer concentration risk</p>
+                        <p className="font-medium text-red-700">✗ Increasing competition from well-funded rivals</p>
+                        <p className="font-medium text-red-700">✗ Path to profitability not yet proven</p>
+                        <p className="font-medium text-red-700">✗ Lockup expiration in 180 days</p>
+                      </>
+                    )}
                   </div>
                 </CardContent>
               </Card>

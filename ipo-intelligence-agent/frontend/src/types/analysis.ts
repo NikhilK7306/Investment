@@ -11,6 +11,7 @@ export interface AnalysisResponse {
   bear_case: string | null
   key_risks: string[]
   key_catalysts: string[]
+  score_breakdown: Record<string, number>
   agent_results: Record<string, unknown>
   completed_at: string | null
   error: string | null
