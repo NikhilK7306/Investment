@@ -204,6 +204,7 @@ class FinancialMetrics:
     roe: Percentage
     roa: Percentage
     roic: Percentage
+    operating_cash_flow: Optional[Money] = None
     pe_ratio: Optional[Ratio] = None
     pb_ratio: Optional[Ratio] = None
     ps_ratio: Optional[Ratio] = None

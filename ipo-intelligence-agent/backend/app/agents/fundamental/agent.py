@@ -222,6 +222,7 @@ Be rigorous, quantitative, and cite specific numbers. Highlight both positives a
             total_equity=money(data.get("total_equity")),
             cash_and_equivalents=money(data.get("cash_and_equivalents")),
             total_debt=money(data.get("total_debt")),
+            operating_cash_flow=money(data.get("operating_cash_flow")),
             debt_to_equity=ratio(data.get("debt_to_equity"), "Debt/Equity"),
             current_ratio=ratio(data.get("current_ratio"), "Current Ratio"),
             quick_ratio=ratio(data.get("quick_ratio"), "Quick Ratio"),

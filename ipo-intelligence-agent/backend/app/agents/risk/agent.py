@@ -388,7 +388,7 @@ OUTPUT:
             ))
         
         # Employee concentration
-        employee_count = company_profile.get("employee_count", 0)
+        employee_count = company_profile.get("employee_count") or 0
         if employee_count < 50:
             risks.append(RiskFactor(
                 category="Operational",
@@ -508,8 +508,8 @@ OUTPUT:
             ))
         
         # Board independence
-        board = company_profile.get("board_members", [])
-        independent = [b for b in board if b.get("independent", False)]
+        board = company_profile.get("board_members") or []
+        independent = [b for b in board if isinstance(b, dict) and b.get("independent", False)]
         if len(board) > 0 and len(independent) / len(board) < 0.5:
             risks.append(RiskFactor(
                 category="Governance",
@@ -577,7 +577,7 @@ OUTPUT:
             ))
         
         # No analyst coverage expected
-        if company_profile.get("employee_count", 0) < 200:
+        if (company_profile.get("employee_count") or 0) < 200:
             risks.append(RiskFactor(
                 category="Post-IPO",
                 factor="Limited Analyst Coverage",
