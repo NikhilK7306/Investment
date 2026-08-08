@@ -312,19 +312,16 @@ class ReportRepository(IORepository):
         self,
         symbol: str,
         analysis_id: UUID,
-        content: str,
-        format: str = "markdown",
-        sections: Optional[List[str]] = None,
+        report_data: Dict[str, Any],
     ) -> UUID:
-        """Save generated report."""
+        """Save generated report (structured sections, metrics, tables)."""
         pass
     
     @abstractmethod
     async def get_latest_report(
         self,
         symbol: str,
-        format: str = "markdown",
-    ) -> Optional[str]:
+    ) -> Optional[Dict[str, Any]]:
         """Get latest report for symbol."""
         pass
     
@@ -332,8 +329,13 @@ class ReportRepository(IORepository):
     async def get_report_by_id(
         self,
         report_id: UUID,
-    ) -> Optional[str]:
+    ) -> Optional[Dict[str, Any]]:
         """Get report by ID."""
+        pass
+
+    @abstractmethod
+    async def list_reports(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """List recent reports across symbols."""
         pass
 
 

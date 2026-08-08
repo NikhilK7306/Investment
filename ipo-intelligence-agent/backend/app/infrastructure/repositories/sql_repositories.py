@@ -1020,49 +1020,148 @@ class SQLReportRepository(SQLBaseRepository, ReportRepository):
         self,
         symbol: str,
         analysis_id: UUID,
-        content: str,
-        format: str = "markdown",
-        sections: Optional[List[str]] = None,
-    ) -> UUID:
-        """Save generated report."""
+        report_data: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Save a structured report into the reports table."""
+        symbol = symbol.upper()
+
+        ipo_result = await self.session.execute(
+            select(IPOModel).where(IPOModel.symbol == symbol)
+        )
+        ipo = ipo_result.scalar_one_or_none()
+        if not ipo:
+            raise ValueError(f"IPO not found for symbol: {symbol}")
+
+        analysis_result = await self.session.execute(
+            select(AnalysisModel).where(AnalysisModel.id == analysis_id)
+        )
+        analysis = analysis_result.scalar_one_or_none()
+        if analysis:
+            analysis_id = analysis.id
+        else:
+            latest = await self.session.execute(
+                select(AnalysisModel)
+                .join(IPOModel, AnalysisModel.ipo_id == IPOModel.id)
+                .where(IPOModel.symbol == symbol)
+                .order_by(desc(AnalysisModel.created_at))
+                .limit(1)
+            )
+            analysis = latest.scalar_one_or_none()
+            if analysis:
+                analysis_id = analysis.id
+
         model = ReportModel(
-            symbol=symbol.upper(),
+            ipo_id=ipo.id,
             analysis_id=analysis_id,
-            content=content,
-            format=format,
-            sections=sections or [],
+            title=report_data.get("title", f"{symbol} - IPO Investment Research Report"),
+            executive_summary=report_data.get("executive_summary", ""),
+            ipo_overview=report_data.get("ipo_overview", ""),
+            company_background=report_data.get("company_background", ""),
+            industry_analysis=report_data.get("industry_analysis", ""),
+            financial_analysis=report_data.get("financial_analysis", ""),
+            valuation_analysis=report_data.get("valuation_analysis", ""),
+            risk_analysis=report_data.get("risk_analysis", ""),
+            management_assessment=report_data.get("management_assessment", ""),
+            sentiment_analysis=report_data.get("sentiment_analysis", ""),
+            bull_case=report_data.get("bull_case", ""),
+            bear_case=report_data.get("bear_case", ""),
+            investment_thesis=report_data.get("investment_thesis", ""),
+            recommendation=report_data.get("recommendation", ""),
+            key_metrics=report_data.get("key_metrics", {}) or {},
+            financial_tables=report_data.get("financial_tables", []) or [],
+            charts=report_data.get("charts", []) or [],
+            sources=report_data.get("sources", []) or [],
+            disclaimers=report_data.get("disclaimers", []) or [],
+            format=report_data.get("format", "markdown"),
+            version=report_data.get("version", "1.0"),
+            generated_by=report_data.get("generated_by", ""),
+            model_version=report_data.get("model_version", ""),
         )
         self.session.add(model)
         await self.session.flush()
-        return model.id
+        return self._to_dict(model, symbol)
+
+    def _to_dict(self, model: ReportModel, symbol: str) -> Dict[str, Any]:
+        return {
+            "id": str(model.id),
+            "symbol": symbol,
+            "analysis_id": str(model.analysis_id),
+            "title": model.title,
+            "executive_summary": model.executive_summary,
+            "ipo_overview": model.ipo_overview,
+            "company_background": model.company_background,
+            "industry_analysis": model.industry_analysis,
+            "financial_analysis": model.financial_analysis,
+            "valuation_analysis": model.valuation_analysis,
+            "risk_analysis": model.risk_analysis,
+            "management_assessment": model.management_assessment,
+            "sentiment_analysis": model.sentiment_analysis,
+            "bull_case": model.bull_case,
+            "bear_case": model.bear_case,
+            "investment_thesis": model.investment_thesis,
+            "recommendation": model.recommendation,
+            "key_metrics": model.key_metrics or {},
+            "financial_tables": model.financial_tables or [],
+            "charts": model.charts or [],
+            "sources": model.sources or [],
+            "disclaimers": model.disclaimers or [],
+            "format": model.format,
+            "version": model.version,
+            "generated_by": model.generated_by,
+            "model_version": model.model_version,
+            "created_at": model.created_at.isoformat() if model.created_at else None,
+        }
+
+    def _select_with_symbol(self, symbol: str):
+        """Statement joining reports with their IPO symbol."""
+        return (
+            select(ReportModel, IPOModel.symbol)
+            .join(AnalysisModel, ReportModel.analysis_id == AnalysisModel.id)
+            .join(IPOModel, AnalysisModel.ipo_id == IPOModel.id)
+            .where(IPOModel.symbol == symbol.upper())
+        )
 
     async def get_latest_report(
         self,
         symbol: str,
-        format: str = "markdown",
-    ) -> Optional[str]:
+    ) -> Optional[Dict[str, Any]]:
         """Get latest report for symbol."""
         result = await self.session.execute(
-            select(ReportModel)
-            .where(
-                and_(
-                    ReportModel.symbol == symbol.upper(),
-                    ReportModel.format == format,
-                )
-            )
+            self._select_with_symbol(symbol)
             .order_by(desc(ReportModel.created_at))
             .limit(1)
         )
-        model = result.scalar_one_or_none()
-        return model.content if model else None
+        row = result.first()
+        if not row:
+            return None
+        model, symbol_value = row
+        return self._to_dict(model, symbol=symbol_value)
 
-    async def get_report_by_id(self, report_id: UUID) -> Optional[str]:
+    async def get_report_by_id(self, report_id: UUID) -> Optional[Dict[str, Any]]:
         """Get report by ID."""
         result = await self.session.execute(
-            select(ReportModel).where(ReportModel.id == report_id)
+            select(ReportModel, IPOModel.symbol)
+            .join(AnalysisModel, ReportModel.analysis_id == AnalysisModel.id)
+            .join(IPOModel, AnalysisModel.ipo_id == IPOModel.id)
+            .where(ReportModel.id == report_id)
         )
-        model = result.scalar_one_or_none()
-        return model.content if model else None
+        row = result.first()
+        if not row:
+            return None
+        model, symbol_value = row
+        return self._to_dict(model, symbol=symbol_value)
+
+    async def list_reports(self, limit: int = 50) -> List[Dict[str, Any]]:
+        """List recent reports across symbols."""
+        result = await self.session.execute(
+            select(ReportModel, IPOModel.symbol)
+            .join(AnalysisModel, ReportModel.analysis_id == AnalysisModel.id)
+            .join(IPOModel, AnalysisModel.ipo_id == IPOModel.id)
+            .order_by(desc(ReportModel.created_at))
+            .limit(limit)
+        )
+        rows = result.all()
+        return [self._to_dict(model, symbol=symbol_value) for model, symbol_value in rows]
 
 
 class SQLMemoryRepository(MemoryRepository):
@@ -1921,10 +2020,10 @@ class SQLJobRepository(JobRepository):
         error: Optional[str] = None,
     ) -> bool:
         """Update job status."""
-        result = await self.session.execute(
+        query_result = await self.session.execute(
             select(JobModel).where(JobModel.id == job_id)
         )
-        model = result.scalar_one_or_none()
+        model = query_result.scalar_one_or_none()
         if model:
             model.status = status
             if result:

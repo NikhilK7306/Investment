@@ -25,7 +25,7 @@ import {
 import { ipoService } from "@/services/ipoService";
 import { analysisService } from "@/services/analysisService";
 import type { IPOResponse } from "@/types/ipo";
-import type { AnalysisResponse } from "@/types/analysis";
+import type { AnalysisResponse, ReportData } from "@/types/analysis";
 
 export default function IPODetailPage({ params }: { params: Promise<{ symbol: string }> }) {
   const { symbol: rawSymbol } = use(params);
@@ -33,9 +33,52 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
   const router = useRouter();
   const [ipo, setIpo] = useState<IPOResponse | null>(null);
   const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
+  const [report, setReport] = useState<ReportData | null>(null);
+  const [reportLoading, setReportLoading] = useState(false);
+  const [generateReportLoading, setGenerateReportLoading] = useState(false);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState("overview");
   const [analyzing, setAnalyzing] = useState(false);
+
+  useEffect(() => {
+    const fetch = async () => {
+      setLoading(true);
+      try {
+        const [ipoData, analysisData] = await Promise.all([
+          ipoService.getBySymbol(symbol).catch(() => null),
+          analysisService.getResult(symbol).catch(() => null),
+        ]);
+        setIpo(ipoData);
+        setAnalysis(analysisData);
+      } catch (err) {
+        console.error("Failed to fetch IPO:", err);
+      } finally {
+        setLoading(false);
+      }
+    };
+    fetch();
+  }, [symbol]);
+
+  const loadReport = async () => {
+    setReportLoading(true);
+    try {
+      const res = await analysisService.getReport(symbol);
+      const reportData = res.agent_results?.report as ReportData | undefined;
+      if (res.status === "completed" && reportData) {
+        setReport(reportData);
+      }
+    } catch (err) {
+      console.error("Failed to load report:", err);
+      setReport(null);
+    } finally {
+      setReportLoading(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeTab === "report") loadReport();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeTab, symbol]);
 
   useEffect(() => {
     const fetch = async () => {
@@ -563,119 +606,150 @@ export default function IPODetailPage({ params }: { params: Promise<{ symbol: st
             <Card>
               <CardHeader className="flex flex-row items-center justify-between">
                 <CardTitle>Investment Research Report</CardTitle>
-                <Button variant="outline"><FileText className="h-4 w-4 mr-2" />Export PDF</Button>
+                <div className="flex gap-2">
+                  <Button
+                    variant="outline"
+                    disabled={generateReportLoading || reportLoading}
+                    onClick={async () => {
+                      setGenerateReportLoading(true);
+                      try {
+                        await analysisService.generateReport(symbol);
+                        await loadReport();
+                      } catch (err) {
+                        console.error("Failed to generate report:", err);
+                      } finally {
+                        setGenerateReportLoading(false);
+                      }
+                    }}
+                  >
+                    <Brain className="h-4 w-4 mr-2" />
+                    {generateReportLoading ? "Generating..." : "Regenerate Report"}
+                  </Button>
+                  <Button variant="outline"><FileText className="h-4 w-4 mr-2" />Export PDF</Button>
+                </div>
               </CardHeader>
               <CardContent className="prose max-w-none space-y-6">
-                <div className="text-center border-b pb-6">
-                  <h2 className="text-3xl font-bold">{ipoName} ({symbol})</h2>
-                  <p className="text-muted-foreground">IPO Investment Research Report</p>
-                  <p className="text-sm text-muted-foreground">Generated: {new Date().toLocaleDateString()}</p>
-                </div>
-
-                <section>
-                  <h3 className="text-xl font-semibold mb-3">Executive Summary</h3>
-                  <p>TechCorp Inc (TECH) is a leading enterprise software provider targeting the $45B enterprise workflow automation market. The company demonstrates strong fundamentals with 29.8% YoY revenue growth, 81% gross margins, and improving free cash flow trajectory. We assign a <strong>BUY</strong> recommendation with an overall score of 82/100.</p>
-                </section>
-
-                <section>
-                  <h3 className="text-xl font-semibold mb-3">Investment Thesis</h3>
-                  <div className="grid gap-4 md:grid-cols-2">
-                    <div className="p-4 rounded-lg bg-green-50 border border-green-200">
-                      <h4 className="font-medium text-green-800 mb-2">Bull Case</h4>
-                      <ul className="space-y-1 text-sm text-green-700">
-                        <li>• Market leader in high-growth vertical (35% CAGR)</li>
-                        <li>• Best-in-class net revenue retention (130%)</li>
-                        <li>• AI/ML differentiation creating moat</li>
-                        <li>• Clear path to profitability by Q4 2025</li>
-                      </ul>
+                {reportLoading ? (
+                  <p className="text-muted-foreground">Loading report...</p>
+                ) : !report ? (
+                  <div className="text-center py-12">
+                    <FileText className="h-12 w-12 mx-auto mb-4 text-muted-foreground" />
+                    <h3 className="text-lg font-medium">No report available</h3>
+                    <p className="text-sm text-muted-foreground">
+                      Run an analysis first, then generate the investment research report.
+                    </p>
+                    <Button
+                      className="mt-4"
+                      disabled={generateReportLoading}
+                      onClick={async () => {
+                        setGenerateReportLoading(true);
+                        try {
+                          await analysisService.generateReport(symbol);
+                          await loadReport();
+                        } catch (err) {
+                          console.error("Failed to generate report:", err);
+                        } finally {
+                          setGenerateReportLoading(false);
+                        }
+                      }}
+                    >
+                      <Brain className="h-4 w-4 mr-2" />
+                      {generateReportLoading ? "Generating..." : "Generate Report"}
+                    </Button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="text-center border-b pb-6">
+                      <h2 className="text-3xl font-bold">{ipoName} ({symbol})</h2>
+                      <p className="text-muted-foreground">IPO Investment Research Report</p>
+                      <p className="text-sm text-muted-foreground">
+                        Generated: {report.created_at ? new Date(report.created_at).toLocaleDateString() : "N/A"}
+                      </p>
                     </div>
-                    <div className="p-4 rounded-lg bg-red-50 border border-red-200">
-                      <h4 className="font-medium text-red-800 mb-2">Bear Case</h4>
-                      <ul className="space-y-1 text-sm text-red-700">
-                        <li>• Trading at premium to peers (8.6x vs 6.2x median)</li>
-                        <li>• Customer concentration (top 3 = 45% revenue)</li>
-                        <li>• Intense competition from MSFT, GOOGL</li>
-                        <li>• Lockup expiration creates overhang</li>
-                      </ul>
+
+                    <section>
+                      <h3 className="text-xl font-semibold mb-3">Executive Summary</h3>
+                      <div className="whitespace-pre-wrap text-sm leading-relaxed">{report.executive_summary}</div>
+                    </section>
+
+                    {report.investment_thesis && (
+                      <section>
+                        <h3 className="text-xl font-semibold mb-3">Investment Thesis</h3>
+                        <div className="grid gap-4 md:grid-cols-2">
+                          {report.bull_case && (
+                            <div className="p-4 rounded-lg bg-green-50 border border-green-200">
+                              <h4 className="font-medium text-green-800 mb-2">Bull Case</h4>
+                              <div className="whitespace-pre-wrap text-sm text-green-700">{report.bull_case}</div>
+                            </div>
+                          )}
+                          {report.bear_case && (
+                            <div className="p-4 rounded-lg bg-red-50 border border-red-200">
+                              <h4 className="font-medium text-red-800 mb-2">Bear Case</h4>
+                              <div className="whitespace-pre-wrap text-sm text-red-700">{report.bear_case}</div>
+                            </div>
+                          )}
+                        </div>
+                      </section>
+                    )}
+
+                    {Object.keys(report.key_metrics || {}).length > 0 && (
+                      <section>
+                        <h3 className="text-xl font-semibold mb-3">Key Metrics</h3>
+                        <div className="overflow-x-auto">
+                          <table className="w-full">
+                            <thead>
+                              <tr className="border-b text-left text-sm text-muted-foreground">
+                                <th className="pb-2">Metric</th>
+                                <th className="pb-2 text-right">Value</th>
+                              </tr>
+                            </thead>
+                            <tbody className="text-sm">
+                              {Object.entries(report.key_metrics).map(([key, value]) => (
+                                <tr key={key} className="border-b last:border-0">
+                                  <td className="py-3 font-medium">
+                                    {key.split("_").map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(" ")}
+                                  </td>
+                                  <td className="py-3 text-right font-medium">
+                                    {typeof value === "number" ? value.toFixed(2) : String(value)}
+                                  </td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                      </section>
+                    )}
+
+                    {[
+                      { label: "IPO Overview", key: "ipo_overview" },
+                      { label: "Company Background", key: "company_background" },
+                      { label: "Industry Analysis", key: "industry_analysis" },
+                      { label: "Financial Analysis", key: "financial_analysis" },
+                      { label: "Valuation Analysis", key: "valuation_analysis" },
+                      { label: "Risk Analysis", key: "risk_analysis" },
+                      { label: "Management Assessment", key: "management_assessment" },
+                      { label: "Sentiment Analysis", key: "sentiment_analysis" },
+                      { label: "Recommendation", key: "recommendation" },
+                    ].map(({ label, key }) => (
+                      (report as unknown as Record<string, string>)[key] ? (
+                        <section key={key}>
+                          <h3 className="text-xl font-semibold mb-3">{label}</h3>
+                          <div className="whitespace-pre-wrap text-sm leading-relaxed">
+                            {(report as unknown as Record<string, string>)[key]}
+                          </div>
+                        </section>
+                      ) : null
+                    ))}
+
+                    <div className="border-t pt-6">
+                      <p className="text-sm text-muted-foreground">
+                        <strong>Disclaimer:</strong> This report is for informational purposes only and does not constitute investment advice.
+                        Past performance is not indicative of future results. The AI agents generating this analysis may make errors.
+                        Please consult with a qualified financial advisor before making investment decisions.
+                      </p>
                     </div>
-                  </div>
-                </section>
-
-                <section>
-                  <h3 className="text-xl font-semibold mb-3">Key Metrics</h3>
-                  <div className="overflow-x-auto">
-                    <table className="w-full">
-                      <thead>
-                        <tr className="border-b text-left text-sm text-muted-foreground">
-                          <th className="pb-2">Metric</th>
-                          <th className="pb-2 text-right">Value</th>
-                          <th className="pb-2 text-right">Peer Median</th>
-                          <th className="pb-2">Assessment</th>
-                        </tr>
-                      </thead>
-                      <tbody className="text-sm">
-                        {[
-                          { metric: "Revenue Growth (YoY)", value: "29.8%", peer: "22.1%", assessment: "Above Average" },
-                          { metric: "Gross Margin", value: "81.0%", peer: "74.5%", assessment: "Best-in-Class" },
-                          { metric: "FCF Margin", value: "3.3%", peer: "-1.2%", assessment: "Above Average" },
-                          { metric: "Net Revenue Retention", value: "130%", peer: "115%", assessment: "Best-in-Class" },
-                          { metric: "Rule of 40", value: "24.7%", peer: "28.3%", assessment: "Below Average" },
-                        ].map((m, i) => (
-                          <tr key={i} className="border-b last:border-0">
-                            <td className="py-3 font-medium">{m.metric}</td>
-                            <td className="py-3 text-right font-medium">{m.value}</td>
-                            <td className="py-3 text-right">{m.peer}</td>
-                            <td className="py-3"><Badge variant="default">{m.assessment}</Badge></td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                </section>
-
-                <section>
-                  <h3 className="text-xl font-semibold mb-3">Valuation</h3>
-                  <div className="grid gap-4 md:grid-cols-3">
-                    <Card>
-                      <CardHeader>
-                        <CardTitle>DCF Valuation</CardTitle>
-                      </CardHeader>
-                      <CardContent>
-                        <p className="text-2xl font-bold">$24.50</p>
-                        <p className="text-sm text-muted-foreground">Fair Value Estimate</p>
-                        <p className="text-sm text-green-600 mt-1">+22.5% upside to mid-point</p>
-                      </CardContent>
-                    </Card>
-                    <Card>
-                      <CardHeader>
-                        <CardTitle>Comparable Companies</CardTitle>
-                      </CardHeader>
-                      <CardContent>
-                        <p className="text-2xl font-bold">$22.80</p>
-                        <p className="text-sm text-muted-foreground">EV/Rev Multiple</p>
-                        <p className="text-sm text-green-600 mt-1">+14% upside</p>
-                      </CardContent>
-                    </Card>
-                    <Card>
-                      <CardHeader>
-                        <CardTitle>Precedent Transactions</CardTitle>
-                      </CardHeader>
-                      <CardContent>
-                        <p className="text-2xl font-bold">$26.20</p>
-                        <p className="text-sm text-muted-foreground">M&A Comps</p>
-                        <p className="text-sm text-green-600 mt-1">+31% upside</p>
-                      </CardContent>
-                    </Card>
-                  </div>
-                </section>
-
-                <div className="border-t pt-6">
-                  <p className="text-sm text-muted-foreground">
-                    <strong>Disclaimer:</strong> This report is for informational purposes only and does not constitute investment advice.
-                    Past performance is not indicative of future results. The AI agents generating this analysis may make errors.
-                    Please consult with a qualified financial advisor before making investment decisions.
-                  </p>
-                </div>
+                  </>
+                )}
               </CardContent>
             </Card>
           </TabsContent>

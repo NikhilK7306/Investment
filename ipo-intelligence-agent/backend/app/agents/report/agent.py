@@ -332,9 +332,14 @@ WRITING GUIDELINES:
             mid = (price_low + price_high) / 2
             parts.append(f"- **Midpoint:** ${mid:.2f}")
 
+        shares_offered = ipo_details.get("shares_offered")
+        shares_line = f"- **Shares Offered:** {shares_offered:,}" if shares_offered else "- **Shares Offered:** TBD"
+        expected_raise = ipo_details.get("expected_raise")
+        raise_line = f"- **Total Offer Size:** ${expected_raise:,.0f}" if expected_raise else "- **Total Offer Size:** TBD"
+
         parts.extend([
-            f"- **Shares Offered:** {ipo_details.get('shares_offered', 'N/A'):,}",
-            f"- **Total Offer Size:** ${ipo_details.get('expected_raise', 0):,.0f}" if ipo_details.get('expected_raise') else "- **Total Offer Size:** TBD",
+            shares_line,
+            raise_line,
             f"- **Overallotment Option:** {'Yes' if ipo_details.get('greenshoe_option') else 'No'}",
         ])
 
@@ -814,9 +819,11 @@ WRITING GUIDELINES:
             "## Board of Directors",
         ])
         board = company_profile.get("board_members", [])
+        if not isinstance(board, list):
+            board = []
+        independent = sum(1 for b in board if isinstance(b, dict) and b.get("independent"))
+        total = len(board)
         if board:
-            independent = sum(1 for b in board if isinstance(b, dict) and b.get("independent"))
-            total = len(board)
             parts.append(f"- **Board Size:** {total} directors")
             parts.append(f"- **Independent Directors:** {independent} ({independent/total:.0%})" if total > 0 else "")
             for b in board[:7]:

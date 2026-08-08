@@ -47,11 +47,24 @@ export const analysisService = {
     return data;
   },
 
-  async generateReport(symbol: string): Promise<{ job_id: string }> {
-    const { data } = await api.post<{ job_id: string }>(
-      "/analysis/report",
-      { symbol }
+  async generateReport(symbol: string): Promise<AnalysisResponse> {
+    const { data } = await api.post<AnalysisResponse>("/analysis/report", {
+      symbol,
+    });
+    return data;
+  },
+
+  async getReport(symbol: string): Promise<AnalysisResponse> {
+    const { data } = await api.get<AnalysisResponse>(
+      `/analysis/report/${symbol}`
     );
+    return data;
+  },
+
+  async listReports(limit = 50): Promise<AnalysisResponse[]> {
+    const { data } = await api.get<AnalysisResponse[]>("/analysis/reports", {
+      params: { limit },
+    });
     return data;
   },
 

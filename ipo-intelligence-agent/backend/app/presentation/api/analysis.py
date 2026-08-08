@@ -142,8 +142,22 @@ def get_collect_use_case(job_repo=Depends(get_job_repo)) -> CollectIPODataUseCas
     return CollectIPODataUseCase(job_repo)
 
 
-def get_report_use_case(job_repo=Depends(get_job_repo)) -> GenerateReportUseCase:
-    return GenerateReportUseCase(job_repo)
+def get_report_use_case(
+    job_repo=Depends(get_job_repo),
+    report_repo=Depends(get_report_repo),
+    analysis_repo=Depends(get_analysis_repo),
+    ipo_repo=Depends(get_ipo_repo),
+    company_repo=Depends(get_company_repo),
+    financial_repo=Depends(get_financial_repo),
+) -> GenerateReportUseCase:
+    return GenerateReportUseCase(
+        job_repo=job_repo,
+        report_repo=report_repo,
+        analysis_repo=analysis_repo,
+        ipo_repo=ipo_repo,
+        company_repo=company_repo,
+        financial_repo=financial_repo,
+    )
 
 
 def get_reflection_use_case(job_repo=Depends(get_job_repo)) -> RunReflectionUseCase:
@@ -180,7 +194,7 @@ class DataCollectionRequest(BaseModel):
 
 class ReportRequest(BaseModel):
     symbol: str = Field(..., min_length=1, max_length=30)
-    analysis_results: Dict[str, Any]
+    analysis_results: Optional[Dict[str, Any]] = None
 
 
 class ReflectionRequest(BaseModel):
@@ -323,9 +337,52 @@ async def generate_report(
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=result["error"])
 
     return AnalysisResponse(
-        job_id=result["job_id"],
+        job_id=str(result["job_id"]),
         symbol=request.symbol.upper(),
-        status="pending",
+        status="completed" if result.get("status") == "completed" else "pending",
+        agent_results={"report": result.get("report", {}), "report_id": result.get("report_id")},
+    )
+
+
+@router.get("/reports", response_model=List[AnalysisResponse])
+async def list_reports(
+    limit: int = Query(50, ge=1, le=200),
+    report_repo: SQLReportRepository = Depends(get_report_repo),
+):
+    """List recent reports across symbols."""
+    reports = await report_repo.list_reports(limit=limit)
+    return [
+        AnalysisResponse(
+            job_id=report.get("analysis_id", ""),
+            symbol=report.get("symbol", ""),
+            status="completed",
+            overall_score=report.get("key_metrics", {}).get("overall_score"),
+            recommendation=str(report.get("key_metrics", {}).get("recommendation", "")) or None,
+            agent_results={"report": report},
+        )
+        for report in reports
+    ]
+
+
+@router.get("/report/{symbol}", response_model=AnalysisResponse)
+async def get_latest_report(
+    symbol: str,
+    report_repo: SQLReportRepository = Depends(get_report_repo),
+):
+    """Get latest generated report for symbol."""
+    report = await report_repo.get_latest_report(symbol.upper())
+    if not report:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Report not found: {symbol}",
+        )
+    return AnalysisResponse(
+        job_id=report.get("analysis_id", ""),
+        symbol=symbol.upper(),
+        status="completed",
+        overall_score=report.get("key_metrics", {}).get("overall_score"),
+        recommendation=str(report.get("key_metrics", {}).get("recommendation", "")) or None,
+        agent_results={"report": report},
     )
 
 

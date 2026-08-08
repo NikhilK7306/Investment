@@ -17,6 +17,37 @@ export interface AnalysisResponse {
   error: string | null
 }
 
+export interface ReportData {
+  id: string
+  ipo_id: string
+  analysis_id: string
+  title: string
+  executive_summary: string
+  ipo_overview: string
+  company_background: string
+  industry_analysis: string
+  financial_analysis: string
+  valuation_analysis: string
+  risk_analysis: string
+  management_assessment: string
+  sentiment_analysis: string
+  bull_case: string
+  bear_case: string
+  investment_thesis: string
+  recommendation: string
+  key_metrics: Record<string, number | string>
+  financial_tables: Record<string, unknown>[]
+  charts: Record<string, unknown>[]
+  sources: Record<string, string>[]
+  disclaimers: string[]
+  format: string
+  version: string
+  generated_by: string
+  model_version: string
+  created_at: string
+  updated_at: string
+}
+
 export interface JobResponse {
   id: string
   job_type: string

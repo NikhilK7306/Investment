@@ -6,7 +6,14 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
 
-from app.application.interfaces.repositories import IPORepository, JobRepository, CompanyRepository
+from app.application.interfaces.repositories import (
+    IPORepository,
+    JobRepository,
+    CompanyRepository,
+    AnalysisRepository,
+    ReportRepository,
+    FinancialRepository,
+)
 from app.domain.enums.enums import (
     IPOStatus,
     Exchange,
@@ -29,6 +36,99 @@ from app.agents.report.agent import ReportGenerationAgent
 from app.agents.memory_agent.agent import MemoryManagementAgent
 from app.agents.reflection_agent.agent import ReflectionAgent
 from app.core.exceptions.base import AgentError
+
+
+def _flat_financials(metrics) -> Dict[str, Any]:
+    """Flatten a FinancialMetrics VO into the simple shape the report agent uses."""
+    from app.domain.value_objects.value_objects import Money, Percentage, Ratio
+
+    def money(val):
+        return val.amount if isinstance(val, Money) else val
+
+    def pct(val):
+        return val.to_decimal() if isinstance(val, Percentage) else val
+
+    def ratio(val):
+        return val.value if isinstance(val, Ratio) else val
+
+    def present(val):
+        return val if val is not None else None
+
+    flat = {
+        "period": getattr(metrics, "period", None) or "N/A",
+        "revenue": money(getattr(metrics, "revenue", None)),
+        "revenue_growth_yoy": pct(getattr(metrics, "revenue_growth_yoy", None)),
+        "gross_profit": money(getattr(metrics, "gross_profit", None)),
+        "gross_margin": pct(getattr(metrics, "gross_margin", None)),
+        "operating_income": money(getattr(metrics, "operating_income", None)),
+        "operating_margin": pct(getattr(metrics, "operating_margin", None)),
+        "net_income": money(getattr(metrics, "net_income", None)),
+        "net_margin": pct(getattr(metrics, "net_margin", None)),
+        "ebitda": money(getattr(metrics, "ebitda", None)),
+        "ebitda_margin": pct(getattr(metrics, "ebitda_margin", None)),
+        "free_cash_flow": money(getattr(metrics, "free_cash_flow", None)),
+        "fcf_margin": pct(getattr(metrics, "fcf_margin", None)),
+        "cash_and_equivalents": money(getattr(metrics, "cash_and_equivalents", None)),
+        "total_debt": money(getattr(metrics, "total_debt", None)),
+        "total_equity": money(getattr(metrics, "total_equity", None)),
+        "operating_cash_flow": money(getattr(metrics, "operating_cash_flow", None)),
+        "debt_to_equity": ratio(getattr(metrics, "debt_to_equity", None)),
+        "current_ratio": ratio(getattr(metrics, "current_ratio", None)),
+        "roe": pct(getattr(metrics, "roe", None)),
+        "roic": pct(getattr(metrics, "roic", None)),
+    }
+    return present({k: v for k, v in flat.items() if v is not None})
+
+
+def _to_int(value):
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return int(value)
+    if isinstance(value, int):
+        return value
+    try:
+        return int(str(value).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _to_float(value):
+    if value is None or isinstance(value, (int, float)):
+        return value
+    try:
+        return float(str(value).replace(",", "").strip())
+    except (ValueError, TypeError):
+        return None
+
+
+def _default_scores(data: Dict[str, Any]) -> Dict[str, Any]:
+    """Fill None numeric score fields so report formatting never crashes."""
+    result = dict(data)
+    for key in (
+        "overall_score", "confidence", "financial_strength_score",
+        "growth_potential_score", "market_opportunity_score",
+        "management_quality_score", "risk_level_score", "sentiment_score",
+    ):
+        if result.get(key) is None:
+            result[key] = 0.0
+    return result
+
+
+def _sanitize_report(value: Any) -> Any:
+    """Recursively convert non-JSON-serializable values (Decimal etc)."""
+    from decimal import Decimal
+    if isinstance(value, Decimal):
+        return float(value)
+    if isinstance(value, (str, int, float, bool, type(None))):
+        return value
+    if isinstance(value, dict):
+        return {str(k): _sanitize_report(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_sanitize_report(v) for v in value]
+    if hasattr(value, 'isoformat'):
+        return value.isoformat()
+    return repr(value)
 
 
 class DiscoverIPOsUseCase:
@@ -322,40 +422,189 @@ class CollectIPODataUseCase:
 
 
 class GenerateReportUseCase:
-    """Use case for generating investment report."""
+    """Use case for generating and persisting investment reports."""
 
-    def __init__(self, job_repo: JobRepository):
+    def __init__(
+        self,
+        job_repo: JobRepository,
+        report_repo: Optional[ReportRepository] = None,
+        analysis_repo: Optional[AnalysisRepository] = None,
+        ipo_repo: Optional[IPORepository] = None,
+        company_repo: Optional[CompanyRepository] = None,
+        financial_repo: Optional[FinancialRepository] = None,
+    ):
         self.job_repo = job_repo
+        self.report_repo = report_repo
+        self.analysis_repo = analysis_repo
+        self.ipo_repo = ipo_repo
+        self.company_repo = company_repo
+        self.financial_repo = financial_repo
 
     async def execute(
         self,
         symbol: str,
-        analysis_results: Dict[str, Any],
+        analysis_results: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Generate investment research report."""
+        """Generate investment research report from the latest stored analysis."""
+        symbol = symbol.upper()
         job_id = await self.job_repo.create_job(
             job_type=JobType.REPORT_GENERATION,
-            payload={"symbol": symbol, "analysis_results": analysis_results},
+            payload={"symbol": symbol},
             priority=5,
         )
-
-        report_agent = ReportGenerationAgent()
 
         context = AgentContext(
             ipo_symbol=symbol,
             analysis_id=job_id,
         )
 
-        result = await report_agent.run_with_retry(context, analysis_results)
+        # Load the latest analysis if no results were passed in
+        stored = None
+        if self.analysis_repo is not None:
+            stored = await self.analysis_repo.get_latest_analysis(symbol)
 
-        if result.status == AgentStatus.COMPLETED:
-            await self.job_repo.update_job_status(job_id, JobStatus.COMPLETED, result.data)
-        else:
-            await self.job_repo.update_job_status(job_id, JobStatus.FAILED, error=result.error)
+        try:
+            input_data = await self._build_input_data(symbol, stored or {})
+            report_agent = ReportGenerationAgent()
+            result = await report_agent.run_with_retry(context, input_data)
+
+            report_id = None
+            if result.status == AgentStatus.COMPLETED:
+                report_payload = (result.data or {}).get("report") or result.data
+                if self.report_repo is not None and report_payload:
+                    analysis_id = (stored or {}).get("id")
+                    saved = await self.report_repo.save_report(
+                        symbol=symbol,
+                        analysis_id=analysis_id or job_id,
+                        report_data=_sanitize_report(report_payload),
+                    )
+                    report_id = saved.get("id") if isinstance(saved, dict) else str(saved)
+                await self.job_repo.update_job_status(
+                    job_id, JobStatus.COMPLETED, _sanitize_report(result.data or {})
+                )
+                return {
+                    "job_id": str(job_id),
+                    "status": JobStatus.COMPLETED.value,
+                    "report": report_payload or {},
+                    "report_id": report_id,
+                }
+
+            error = result.error or "Unknown error"
+            await self.job_repo.update_job_status(job_id, JobStatus.FAILED, error=error)
+            return {
+                "job_id": str(job_id),
+                "status": JobStatus.FAILED.value,
+                "error": error,
+            }
+        except Exception as e:
+            await self.job_repo.update_job_status(job_id, JobStatus.FAILED, error=str(e))
+            return {
+                "job_id": str(job_id),
+                "status": JobStatus.FAILED.value,
+                "error": str(e),
+            }
+
+    @staticmethod
+    def _ipo_details_for_report(ipo) -> Dict[str, Any]:
+        """Remap IPODetails into the key shape the report agent expects."""
+        source = ipo.to_dict() if hasattr(ipo, 'to_dict') else {}
+
+        def money_to_float(value):
+            if value is None:
+                return None
+            raw = value.amount if hasattr(value, "amount") else value
+            if isinstance(raw, str):
+                try:
+                    raw = float(raw.replace("$", "").replace(",", "").split()[0])
+                except (ValueError, IndexError):
+                    return None
+            return float(raw)
+
+        price_range = source.get("price_range") or {}
+        valuation = source.get("valuation") or {}
+        details = {
+            "symbol": source.get("symbol", ""),
+            "company_name": source.get("company_name", ""),
+            "expected_price_low": money_to_float(price_range.get("low")),
+            "expected_price_high": money_to_float(price_range.get("high")),
+            "shares_offered": _to_int(source.get("shares_offered")),
+            "expected_raise": money_to_float(source.get("expected_raise")),
+            "greenshoe_option": source.get("greenshoe_option", False),
+            "greenshoe_shares": _to_int(source.get("greenshoe_shares")),
+            "expected_valuation_low": money_to_float(valuation.get("equity_value")),
+            "expected_valuation_high": money_to_float(valuation.get("enterprise_value")),
+            "post_money_valuation": money_to_float(valuation.get("equity_value")),
+            "lead_underwriters": [source.get("lead_underwriter")] if source.get("lead_underwriter") else [],
+            "co_managers": source.get("unders", []),
+            "lockup_expiry": source.get("lockup_expiry"),
+            "lockup_days": _to_int(source.get("lockup_period_days")),
+            "insider_shares_pct": _to_float(source.get("insider_shares_pct")),
+            "prospectus_url": source.get("prospectus_url"),
+        }
+        result = {}
+        for k, v in details.items():
+            if v is None:
+                continue
+            if k == "greenshoe_option" and v is False:
+                continue
+            result[k] = v
+        return result
+
+    async def _build_input_data(
+        self,
+        symbol: str,
+        stored: Optional[Dict[str, Any]],
+    ) -> Dict[str, Any]:
+        """Build the input dict the report agent expects."""
+        ipo_details = {}
+        if self.ipo_repo is not None:
+            ipo = await self.ipo_repo.get_by_symbol(symbol)
+            if ipo:
+                ipo_details = self._ipo_details_for_report(ipo)
+
+        company_profile = {}
+        if self.company_repo is not None:
+            company = await self.company_repo.get_by_symbol(symbol)
+            if company:
+                company_profile = (
+                    company.to_dict() if hasattr(company, 'to_dict') else {}
+                )
+
+        financials = {"statements": []}
+        if self.financial_repo is not None:
+            history = await self.financial_repo.get_history(symbol, periods=8)
+            for metrics in history:
+                financials["statements"].append(
+                    _flat_financials(metrics)
+                )
+
+        overall_analysis = _default_scores(stored or {})
+
+        # Split stored agent_results (list of dicts) back into per-agent inputs
+        by_agent: Dict[str, Any] = {}
+        raw_agent_results = stored.get("agent_results") if stored else None
+        if isinstance(raw_agent_results, list):
+            for entry in raw_agent_results:
+                name = entry.get("agent_name") if isinstance(entry, dict) else None
+                if name:
+                    by_agent[name] = entry
+
+        def agent_data(agent_name: str) -> Dict[str, Any]:
+            entry = by_agent.get(agent_name) or {}
+            if isinstance(entry, dict):
+                return entry.get("data") if isinstance(entry.get("data"), dict) else {}
+            return {}
 
         return {
-            "job_id": str(job_id),
-            "result": result.to_dict() if hasattr(result, 'to_dict') else result.__dict__,
+            "overall_analysis": overall_analysis,
+            "fundamental_analysis": agent_data("fundamental"),
+            "market_analysis": agent_data("market"),
+            "risk_analysis": agent_data("risk"),
+            "sentiment_analysis": agent_data("sentiment"),
+            "ipo_details": ipo_details,
+            "company_profile": company_profile,
+            "financials": financials,
+            "public_comps": [],
         }
 
 
