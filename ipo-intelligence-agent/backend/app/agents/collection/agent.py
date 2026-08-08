@@ -342,15 +342,53 @@ Return structured, validated data with source attribution and confidence scores.
         return ratios
 
     async def _fetch_sec_filings(self, symbol: str) -> List[Dict]:
-        """Fetch SEC filings for pre-IPO companies."""
-        # In production, use sec-edgar-downloader or SEC API
-        # For now, return placeholder
-        return [{
-            "filing_type": "S-1",
-            "date": "2024-01-15",
-            "url": f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcompany&CIK={symbol}",
-            "status": "filed",
-        }]
+        """Fetch recent SEC filings for pre-IPO companies from EDGAR."""
+        try:
+            headers = {
+                "User-Agent": "IPO Intelligence Research dev@example.com",
+            }
+            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+                tickers_resp = await client.get(
+                    "https://www.sec.gov/files/company_tickers.json", headers=headers
+                )
+                if tickers_resp.status_code != 200:
+                    return []
+                cik = None
+                for entry in tickers_resp.json().values():
+                    if str(entry.get("ticker", "")).upper() == symbol.upper():
+                        cik = entry.get("cik_str")
+                        break
+                if not cik:
+                    return []
+                sub_resp = await client.get(
+                    f"https://data.sec.gov/submissions/CIK{str(cik).zfill(10)}.json",
+                    headers=headers,
+                )
+                if sub_resp.status_code != 200:
+                    return []
+                data = sub_resp.json()
+                recent = data.get("filings", {}).get("recent", {})
+                forms = recent.get("form", []) or []
+                accessions = recent.get("accessionNumber", []) or []
+                filing_dates = recent.get("filingDate", []) or []
+                primary_docs = recent.get("primaryDocument", []) or []
+                filings = []
+                for i, form in enumerate(forms):
+                    if form not in ("S-1", "S-1A", "F-1", "F-1A", "10-K", "10-Q", "8-K"):
+                        continue
+                    accession = accessions[i] if i < len(accessions) else ""
+                    acc_no = accession.replace("-", "")
+                    primary = primary_docs[i] if i < len(primary_docs) else ""
+                    filings.append({
+                        "filing_type": form,
+                        "date": filing_dates[i] if i < len(filing_dates) else "",
+                        "url": f"https://www.sec.gov/Archives/edgar/data/{cik}/{acc_no}/{primary}",
+                    })
+                    if len(filings) >= 10:
+                        break
+                return filings
+        except Exception:
+            return []
 
     async def _collect_company_profile(
         self,
