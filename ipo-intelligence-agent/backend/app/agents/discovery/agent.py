@@ -407,13 +407,20 @@ Return structured data for each IPO found. Be thorough but avoid duplicates."""
 
     @staticmethod
     def _parse_date(value: Any) -> Optional[datetime]:
-        """Parse an ISO date string (e.g. 2026-08-12)."""
+        """Parse an ISO date string (e.g. 2026-08-12) or US M/D/YYYY (e.g. 8/06/2026)."""
         if not value:
             return None
+        raw = str(value).strip()
         try:
-            return datetime.fromisoformat(str(value).strip())
+            return datetime.fromisoformat(raw.replace("Z", "+00:00"))
         except ValueError:
-            return None
+            pass
+        for fmt in ("%m/%d/%Y", "%m/%d/%y", "%d-%b-%Y", "%d %b %Y"):
+            try:
+                return datetime.strptime(raw, fmt)
+            except ValueError:
+                continue
+        return None
 
     @staticmethod
     def _parse_size(value: Any) -> Optional[Money]:

@@ -315,7 +315,10 @@ class AnalyzeIPOUseCase:
             risk_factors=[],
             sentiment=sentiment_label,
             sentiment_score=round(sentiment_score, 3),
-            sentiment_drivers=sentiment_data.get("themes", [])[:5] if isinstance(sentiment_data.get("themes"), list) else [],
+            sentiment_drivers=(
+                list(sentiment_data.get("positive_themes", []) or [])
+                + list(sentiment_data.get("negative_themes", []) or [])
+            )[:5],
             agent_results=[self._sanitize(r.to_dict()) for r in agent_map.values() if r.status == AgentStatus.COMPLETED],
             completed_at=datetime.utcnow(),
             model_version="2.0.0",
