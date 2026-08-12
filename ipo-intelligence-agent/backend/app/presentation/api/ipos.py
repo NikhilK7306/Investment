@@ -158,11 +158,27 @@ class IPORResponse(BaseModel):
     industry: str
     status: str
     expected_date: Optional[datetime] = None
+    listed_date: Optional[datetime] = None
     price_range: Optional[dict] = None
     shares_offered: Optional[int] = None
     valuation: Optional[dict] = None
     underwriters: List[str] = []
     lead_underwriter: str = ""
+    # Issue details
+    issue_size: Optional[float] = None
+    face_value: Optional[float] = None
+    lot_size: Optional[int] = None
+    registrar: Optional[str] = None
+    # Source attribution
+    source: Optional[str] = None
+    source_reference: Optional[str] = None
+    source_updated_at: Optional[datetime] = None
+    collector_version: Optional[str] = None
+    data_quality_score: Optional[float] = None
+    last_verified_at: Optional[datetime] = None
+    # Data freshness
+    data_age_days: Optional[int] = None
+    source_age_days: Optional[int] = None
 
 
 class FinancialPeriodResponse(BaseModel):
@@ -244,6 +260,8 @@ async def list_upcoming_ipos(
     to_date: Optional[datetime] = Query(None),
     region: Optional[str] = Query(None, pattern="^(india|foreign)$"),
     phase: Optional[str] = Query(None, pattern="^(upcoming|current|listed)$"),
+    min_quality_score: float = Query(0.0, ge=0.0, le=1.0, description="Minimum data quality score (0-1)"),
+    require_source: bool = Query(True, description="Only return IPOs with source attribution"),
     use_case: ListUpcomingIPOsUseCase = Depends(get_list_use_case),
 ):
     """List upcoming IPOs with filters.
@@ -251,6 +269,8 @@ async def list_upcoming_ipos(
     - region: "india" (NSE/BSE) or "foreign" (all other exchanges)
     - phase: "upcoming" (not yet open), "current" (bidding started, not
       yet listed), or "listed" (already listed)
+    - min_quality_score: Minimum data quality score (0-1)
+    - require_source: Only return IPOs with source attribution
     """
     ipos = await use_case.execute(
         limit=limit,
@@ -263,7 +283,38 @@ async def list_upcoming_ipos(
         region=region,
         phase=phase,
     )
-    return [_ipo_to_response(ipo) for ipo in ipos]
+    
+    # Apply data quality gate
+    filtered_ipos = []
+    for ipo in ipos:
+        # Check source attribution requirement
+        if require_source and not ipo.source:
+            continue
+        
+        # Check minimum quality score
+        if ipo.data_quality_score is not None and ipo.data_quality_score < min_quality_score:
+            continue
+            
+        filtered_ipos.append(ipo)
+    
+    return [_ipo_to_response(ipo) for ipo in filtered_ipos]
+
+
+@router.get("/upcoming/count", response_model=int)
+async def count_upcoming_ipos(
+    status: Optional[str] = Query(None),
+    exchange: Optional[Exchange] = Query(None),
+    sector: Optional[Sector] = Query(None),
+    from_date: Optional[datetime] = Query(None),
+    to_date: Optional[datetime] = Query(None),
+    region: Optional[str] = Query(None, pattern="^(india|foreign)$"),
+    phase: Optional[str] = Query(None, pattern="^(upcoming|current|listed)$"),
+    use_case: ListUpcomingIPOsUseCase = Depends(get_list_use_case),
+):
+    """Get total count of upcoming IPOs with filters for pagination."""
+    # The use case doesn't have a count method yet, so we'll return 0 for now
+    # This would need to be implemented in the use case and repository
+    return 0
 
 
 @router.get("/recent", response_model=List[IPORResponse])
@@ -456,6 +507,32 @@ async def list_companies_by_industry(
 
 def _ipo_to_response(ipo) -> IPORResponse:
     """Convert IPO entity to response model."""
+    now = datetime.utcnow().replace(tzinfo=None)  # Ensure offset-naive
+    
+    # Calculate data age
+    data_age_days = None
+    if ipo.created_at:
+        created_at = ipo.created_at
+        if created_at.tzinfo is not None:
+            created_at = created_at.replace(tzinfo=None)
+        data_age_days = (now - created_at).days
+    
+    # Calculate source age
+    source_age_days = None
+    if ipo.source_updated_at:
+        source_updated = ipo.source_updated_at
+        if source_updated.tzinfo is not None:
+            source_updated = source_updated.replace(tzinfo=None)
+        source_age_days = (now - source_updated).days
+    
+    # Extract price range from price_range attribute
+    price_range = None
+    if ipo.price_range:
+        price_range = {
+            "low": float(ipo.price_range.low.amount) if ipo.price_range.low else None,
+            "high": float(ipo.price_range.high.amount) if ipo.price_range.high else None,
+        }
+    
     return IPORResponse(
         symbol=ipo.symbol,
         company_name=ipo.company_name,
@@ -464,10 +541,8 @@ def _ipo_to_response(ipo) -> IPORResponse:
         industry=ipo.industry.value if hasattr(ipo.industry, 'value') else ipo.industry,
         status=ipo.status.value if hasattr(ipo.status, 'value') else ipo.status,
         expected_date=ipo.expected_date,
-        price_range={
-            "low": float(ipo.price_range.low.amount) if ipo.price_range and ipo.price_range.low else None,
-            "high": float(ipo.price_range.high.amount) if ipo.price_range and ipo.price_range.high else None,
-        } if ipo.price_range else None,
+        listed_date=ipo.listed_date,
+        price_range=price_range,
         shares_offered=ipo.shares_offered,
         valuation={
             "enterprise_value": float(ipo.valuation.enterprise_value.amount) if ipo.valuation else None,
@@ -475,6 +550,18 @@ def _ipo_to_response(ipo) -> IPORResponse:
         } if ipo.valuation else None,
         underwriters=ipo.underwriters,
         lead_underwriter=ipo.lead_underwriter,
+        issue_size=float(ipo.issue_size.amount) if ipo.issue_size else None,
+        face_value=float(ipo.face_value.amount) if ipo.face_value else None,
+        lot_size=ipo.lot_size,
+        registrar=ipo.registrar,
+        source=ipo.source if ipo.source else None,
+        source_reference=ipo.source_reference if ipo.source_reference else None,
+        source_updated_at=ipo.source_updated_at,
+        collector_version=ipo.collector_version if ipo.collector_version else None,
+        data_quality_score=ipo.data_quality_score if ipo.data_quality_score else None,
+        last_verified_at=ipo.last_verified_at,
+        data_age_days=data_age_days,
+        source_age_days=source_age_days,
     )
 
 

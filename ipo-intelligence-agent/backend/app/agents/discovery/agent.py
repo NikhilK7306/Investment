@@ -7,44 +7,34 @@ from decimal import Decimal
 from typing import Any, Dict, List, Optional, Set
 from uuid import uuid4
 
-import httpx
-from bs4 import BeautifulSoup
-
 from app.agents.base.agent import AgentContext, AgentResult, BaseAgent
 from app.domain.enums.enums import AgentName, AgentStatus, Exchange, IPOStatus, Sector, Industry
 from app.domain.value_objects.value_objects import IPODetails, PriceRange
 from app.domain.value_objects.value_objects import Money, Percentage
 from app.core.exceptions.base import AgentError
+from app.infrastructure.external_services import get_provider_registry
 
 
 class DiscoveryAgent(BaseAgent[Dict[str, Any], List[IPODetails]]):
-    """Agent that discovers upcoming IPOs from multiple sources."""
+    """Agent that discovers upcoming IPOs from multiple sources using provider registry."""
     
     def __init__(self):
         super().__init__(
             name=AgentName.DISCOVERY,
             description="Discovers upcoming IPOs from exchanges, SEC filings, and financial news",
-            version="1.0.0",
+            version="2.0.0",
             max_retries=3,
-            timeout_seconds=120,
+            timeout_seconds=180,
         )
-        self._sources = {
-            "nasdaq": "https://www.nasdaq.com/market-activity/ipos",
-            "nyse": "https://www.nyse.com/ipo-center",
-            "sec": "https://efts.sec.gov/LATEST/search-index",
-            "ipowatch": "https://www.ipowatch.com/upcoming-ipos/",
-            "renaissance": "https://www.renaissancecapital.com/ipo-calendar",
-            "investorgain": "https://www.investorgain.com/report/ipo-gmp-live/331/all/",
-        }
         self._seen_symbols: Set[str] = set()
     
     @property
     def system_prompt(self) -> str:
         return """You are an IPO Discovery Agent. Your job is to identify and extract information about upcoming IPOs from various data sources.
 
-You have access to web scraping tools and financial APIs. When analyzing sources, look for:
+You have access to multiple data providers for Indian and International IPOs. When analyzing sources, look for:
 1. Company name and ticker symbol
-2. Exchange (NASDAQ, NYSE, etc.)
+2. Exchange (NASDAQ, NYSE, NSE, BSE, etc.)
 3. Expected IPO date
 4. Price range (if available)
 5. Shares offered
@@ -52,17 +42,15 @@ You have access to web scraping tools and financial APIs. When analyzing sources
 7. Underwriters
 8. Use of proceeds
 
-Return structured data for each IPO found. Be thorough but avoid duplicates."""
+Return structured data for each IPO found. Be thorough but avoid duplicates.
+Handle missing data gracefully using NOT_ANNOUNCED, NOT_AVAILABLE, NOT_APPLICABLE states."""
     
     @property
     def available_tools(self) -> List[str]:
         return [
-            "fetch_nasdaq_ipos",
-            "fetch_nyse_ipos",
-            "fetch_sec_filings",
-            "fetch_renaissance_calendar",
-            "fetch_ipowatch",
-            "fetch_investorgain_ipos",
+            "fetch_indian_ipos",
+            "fetch_international_ipos",
+            "fetch_all_ipos",
             "validate_ipo_data",
             "check_duplicate",
         ]
@@ -72,39 +60,46 @@ Return structured data for each IPO found. Be thorough but avoid duplicates."""
         context: AgentContext,
         input_data: Dict[str, Any],
     ) -> AgentResult[List[IPODetails]]:
-        """Execute IPO discovery."""
+        """Execute IPO discovery using provider registry."""
         start_time = datetime.utcnow()
         discovered_ipos = []
         errors = []
         
         # Get configuration
         lookahead_days = input_data.get("lookahead_days", 90)
-        sources = input_data.get("sources", ["nasdaq", "nyse", "sec", "renaissance"])
+        sources = input_data.get("sources", ["nasdaq", "nyse", "sec", "renaissance", "investorgain"])
         min_market_cap = input_data.get("min_market_cap", 0)
+        region = input_data.get("region", "all")  # "india", "international", "all"
         
-        # Run discovery for each source
-        source_tasks = []
-        if "nasdaq" in sources:
-            source_tasks.append(self._fetch_nasdaq_ipos(lookahead_days))
-        if "nyse" in sources:
-            source_tasks.append(self._fetch_nyse_ipos(lookahead_days))
-        if "sec" in sources:
-            source_tasks.append(self._fetch_sec_filings(lookahead_days))
-        if "renaissance" in sources:
-            source_tasks.append(self._fetch_renaissance_calendar(lookahead_days))
-        if "investorgain" in sources:
-            source_tasks.append(self._fetch_investorgain_ipos())
+        # Get provider registry
+        registry = get_provider_registry()
         
-        # Execute in parallel
-        results = await asyncio.gather(*source_tasks, return_exceptions=True)
+        # Fetch from IPO providers with fallback
+        ipo_providers = registry.get_ipo_providers()
         
-        # Process results
-        for i, result in enumerate(results):
-            source_name = sources[i]
-            if isinstance(result, Exception):
-                errors.append(f"{source_name}: {str(result)}")
-            elif isinstance(result, list):
-                discovered_ipos.extend(result)
+        # Filter providers by region if specified
+        if region == "india":
+            ipo_providers = [p for p in ipo_providers if p.name in ("investorgain", "nse_india", "bse_india", "sebi")]
+        elif region == "international":
+            ipo_providers = [p for p in ipo_providers if p.name in ("nasdaq", "nyse", "sec_edgar", "renaissance")]
+        
+        # Execute discovery with fallback
+        for provider in ipo_providers:
+            if not provider.config.enabled:
+                continue
+                
+            try:
+                result = await provider.fetch_upcoming(
+                    lookahead_days=lookahead_days,
+                )
+                
+                if result.success and result.data:
+                    discovered_ipos.extend(result.data)
+                elif result.error:
+                    errors.append(f"{provider.name}: {result.error}")
+                    
+            except Exception as e:
+                errors.append(f"{provider.name}: {str(e)}")
         
         # Deduplicate
         unique_ipos = self._deduplicate_ipos(discovered_ipos)
@@ -113,7 +108,7 @@ Return structured data for each IPO found. Be thorough but avoid duplicates."""
         if min_market_cap > 0:
             unique_ipos = [
                 ipo for ipo in unique_ipos
-                if ipo.valuation and ipo.valuation.equity_value.amount >= min_market_cap
+                if ipo.expected_raise and ipo.expected_raise.amount >= min_market_cap
             ]
         
         # Enrich with additional data
@@ -127,10 +122,10 @@ Return structured data for each IPO found. Be thorough but avoid duplicates."""
             data=enriched_ipos,
             error="; ".join(errors) if errors else None,
             confidence=0.9 if not errors else 0.7,
-            reasoning=f"Discovered {len(enriched_ipos)} unique IPOs from {len(sources)} sources",
-            evidence=[f"Source: {s}" for s in sources] + errors,
+            reasoning=f"Discovered {len(enriched_ipos)} unique IPOs from {len(ipo_providers)} providers",
+            evidence=[f"Provider: {p.name}" for p in ipo_providers] + errors,
             metadata={
-                "sources_checked": sources,
+                "providers_used": [p.name for p in ipo_providers],
                 "total_found": len(discovered_ipos),
                 "after_dedup": len(unique_ipos),
                 "after_filter": len(enriched_ipos),
@@ -139,306 +134,22 @@ Return structured data for each IPO found. Be thorough but avoid duplicates."""
             duration_ms=duration_ms,
         )
     
-    async def _fetch_nasdaq_ipos(self, lookahead_days: int) -> List[IPODetails]:
-        """Fetch IPOs from NASDAQ (filed and upcoming calendar sections)."""
-        ipos = []
-        try:
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-                response = await client.get(
-                    "https://api.nasdaq.com/api/ipo/calendar",
-                    params={"limit": 100},
-                    headers={"User-Agent": "IPO Intelligence Agent/1.0"},
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    sections = data.get("data", {})
-                    for section in ("filed", "upcoming"):
-                        table = sections.get(section)
-                        if not isinstance(table, dict):
-                            continue
-                        for item in table.get("rows", []):
-                            ipo = self._parse_nasdaq_item(item)
-                            if ipo:
-                                ipos.append(ipo)
-        except Exception as e:
-            raise AgentError(f"NASDAQ fetch failed: {e}", self.name.value)
+    async def _enrich_ipos(self, ipos: List[IPODetails]) -> List[IPODetails]:
+        """Enrich IPOs with additional data from collection providers."""
+        # In production, this would fetch additional details
+        # like company profiles, financials, etc.
         return ipos
     
-    def _parse_nasdaq_item(self, item: Dict[str, Any]) -> Optional[IPODetails]:
-        """Parse a NASDAQ IPO calendar row (current API schema)."""
-        try:
-            symbol = (item.get("proposedTickerSymbol") or item.get("symbol") or "").upper().strip()
-            if not symbol or symbol in self._seen_symbols:
-                return None
-            
-            self._seen_symbols.add(symbol)
-            
-            exchange = Exchange.NASDAQ
-            exchange_raw = (item.get("proposedExchange") or "").upper()
-            if "NYSE" in exchange_raw:
-                exchange = Exchange.NYSE
-            
-            expected_date = self._parse_date(
-                item.get("expectedDate") or item.get("pricedDate") or item.get("filedDate")
-            )
-            
-            price_range = None
-            offer_price = None
-            price_raw = (item.get("proposedSharePrice") or "").replace(",", "").strip()
-            if price_raw:
-                try:
-                    amount = Decimal(price_raw)
-                    offer_price = Money(amount=amount, currency="USD")
-                    price_range = PriceRange(low=offer_price, high=offer_price)
-                except Exception:
-                    price_range = None
-            
-            shares_offered = None
-            shares_raw = (item.get("sharesOffered") or "").replace(",", "").strip()
-            if shares_raw:
-                try:
-                    shares_offered = int(Decimal(shares_raw))
-                except Exception:
-                    pass
-            
-            return IPODetails(
-                symbol=symbol,
-                company_name=item.get("companyName", ""),
-                exchange=exchange,
-                expected_date=expected_date,
-                status=IPOStatus.FILED.value,
-                shares_offered=shares_offered,
-                price_range=price_range,
-                offer_price=offer_price,
-                underwriters=[],
-                sector=self._map_sector(item.get("sector", "")),
-                industry=self._map_industry(item.get("industry", "")),
-            )
-        except Exception:
-            return None
+    def _deduplicate_ipos(self, ipos: List[IPODetails]) -> List[IPODetails]:
+        """Remove duplicate IPOs based on symbol."""
+        seen = set()
+        unique = []
+        for ipo in ipos:
+            if ipo.symbol not in seen:
+                seen.add(ipo.symbol)
+                unique.append(ipo)
+        return unique
     
-    async def _fetch_nyse_ipos(self, lookahead_days: int) -> List[IPODetails]:
-        """Fetch IPOs from NYSE."""
-        ipos = []
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(
-                    "https://www.nyse.com/api/ipo/calendar",
-                    headers={"User-Agent": "IPO Intelligence Agent/1.0"},
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    for item in data.get("upcoming", []):
-                        ipo = self._parse_nyse_item(item)
-                        if ipo:
-                            ipos.append(ipo)
-        except Exception as e:
-            raise AgentError(f"NYSE fetch failed: {e}", self.name.value)
-        return ipos
-    
-    def _parse_nyse_item(self, item: Dict[str, Any]) -> Optional[IPODetails]:
-        """Parse NYSE IPO item."""
-        try:
-            symbol = item.get("symbol", "").upper()
-            if not symbol or symbol in self._seen_symbols:
-                return None
-            
-            self._seen_symbols.add(symbol)
-            
-            expected_date = None
-            if item.get("expectedDate"):
-                expected_date = datetime.fromisoformat(item["expectedDate"])
-            
-            price_range = None
-            if item.get("priceLow") and item.get("priceHigh"):
-                low = Money(amount=item["priceLow"], currency="USD")
-                high = Money(amount=item["priceHigh"], currency="USD")
-                price_range = PriceRange(low=low, high=high)
-            
-            return IPODetails(
-                symbol=symbol,
-                company_name=item.get("companyName", ""),
-                exchange=Exchange.NYSE,
-                expected_date=expected_date,
-                status=IPOStatus.FILED.value,
-                shares_offered=item.get("sharesOffered"),
-                price_range=price_range,
-                underwriters=item.get("underwriters", []),
-                sector=self._map_sector(item.get("sector", "")),
-                industry=self._map_industry(item.get("industry", "")),
-            )
-        except Exception:
-            return None
-    
-    async def _fetch_sec_filings(self, lookahead_days: int) -> List[IPODetails]:
-        """Fetch IPOs from SEC EDGAR full-text search (recent S-1/F-1 filings)."""
-        ipos = []
-        try:
-            async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-                response = await client.get(
-                    "https://efts.sec.gov/LATEST/search-index",
-                    params={
-                        "q": '"S-1" OR "F-1"',
-                        "forms": "S-1,F-1",
-                        "dateRange": "m",
-                    },
-                    headers={"User-Agent": "IPO Intelligence Research dev@example.com"},
-                )
-                if response.status_code != 200:
-                    return ipos
-                data = response.json()
-                hits = data.get("hits", {}).get("hits", []) or []
-                cutoff = datetime.utcnow() - timedelta(days=lookahead_days)
-                for hit in hits:
-                    src = hit.get("_source", {})
-                    if not isinstance(src, dict):
-                        continue
-                    form = str(src.get("form", ""))
-                    root_form = form.split("/")[0]
-                    if root_form not in ("S-1", "F-1"):
-                        continue
-                    file_date = self._parse_date(src.get("file_date"))
-                    if not file_date or file_date < cutoff:
-                        continue
-                    display_names = src.get("display_names") or []
-                    if not display_names:
-                        continue
-                    name = str(display_names[0]).split(" (CIK")[0].strip()
-                    ticker_match = re.search(r"\(\s*([A-Z0-9]{1,12})(?:[,\s/]|\))", name)
-                    symbol = (ticker_match.group(1) if ticker_match else self._to_symbol(name)).upper()
-                    name = re.sub(r"\s*\([^)]*[A-Z0-9][^)]*\)\s*$", "", name).strip()
-                    if not symbol or symbol in self._seen_symbols:
-                        continue
-                    self._seen_symbols.add(symbol)
-                    ipos.append(IPODetails(
-                        symbol=symbol,
-                        company_name=name,
-                        exchange=Exchange.OTHER,
-                        expected_date=file_date,
-                        status=IPOStatus.FILED.value,
-                        sector=Sector.UNCLASSIFIED,
-                        industry=Industry.OTHER,
-                    ))
-        except Exception as e:
-            raise AgentError(f"SEC fetch failed: {e}", self.name.value)
-        return ipos
-    
-    async def _fetch_renaissance_calendar(self, lookahead_days: int) -> List[IPODetails]:
-        """Fetch from Renaissance Capital IPO calendar."""
-        ipos = []
-        try:
-            async with httpx.AsyncClient(timeout=30.0) as client:
-                response = await client.get(
-                    "https://www.renaissancecapital.com/ipo-calendar",
-                    headers={"User-Agent": "IPO Intelligence Agent/1.0"},
-                )
-                
-                if response.status_code == 200:
-                    soup = BeautifulSoup(response.text, "html.parser")
-                    # Parse the calendar table
-                    # This would need actual HTML parsing based on their structure
-                    pass
-        except Exception as e:
-            raise AgentError(f"Renaissance fetch failed: {e}", self.name.value)
-        return ipos
-    
-    async def _fetch_investorgain_ipos(self) -> List[IPODetails]:
-        """Fetch Indian IPO GMP data from investorgain.com."""
-        ipos = []
-        now = datetime.utcnow()
-        fy = f"{now.year}-{str(now.year + 1)[-2:]}" if now.month >= 4 else f"{now.year - 1}-{str(now.year)[-2:]}"
-        hosts = ["webnodejs.investorgain.com", "alphanodejs.investorgain.com"]
-
-        last_error = None
-        for host in hosts:
-            url = (
-                f"https://{host}/cloud/v2/report/data-read/331/1/"
-                f"{now.month}/{now.year}/{fy}/0/all?search="
-            )
-            try:
-                async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
-                    response = await client.get(url, headers={"User-Agent": "IPO Intelligence Agent/1.0"})
-                    if response.status_code != 200:
-                        last_error = AgentError(f"investorgain {host} returned {response.status_code}")
-                        continue
-                    data = response.json()
-                    if data.get("msg") != 1:
-                        last_error = AgentError(f"investorgain {host} returned unexpected payload")
-                        continue
-                    for item in data.get("reportTableData", []):
-                        ipo = self._parse_investorgain_item(item)
-                        if ipo:
-                            ipos.append(ipo)
-                    return ipos
-            except Exception as e:
-                last_error = AgentError(f"investorgain {host} fetch failed: {e}")
-
-        raise AgentError(f"investorgain fetch failed: {last_error}", self.name.value)
-
-    def _parse_investorgain_item(self, item: Dict[str, Any]) -> Optional[IPODetails]:
-        """Parse a single investorgain GMP table row."""
-        try:
-            name = (item.get("~ipo_name") or "").strip()
-            if not name:
-                return None
-
-            symbol = self._to_symbol(name)
-            if not symbol or symbol in self._seen_symbols:
-                return None
-            self._seen_symbols.add(symbol)
-
-            name_html = item.get("Name", "")
-            category = (item.get("~IPO_Category") or "").upper()
-
-            exchange = Exchange.NSE
-            if "BSE" in name_html.upper():
-                exchange = Exchange.BSE
-
-            today = datetime.utcnow().date()
-            expected_date = self._parse_date(item.get("~Srt_Open"))
-            close_date = self._parse_date(item.get("~Srt_Close"))
-            listing_date = self._parse_date(item.get("~Str_Listing"))
-
-            status = IPOStatus.ANNOUNCED
-            if listing_date and listing_date.date() < today:
-                status = IPOStatus.LISTED
-            elif expected_date:
-                status = IPOStatus.FILED
-
-            price_range = None
-            offer_price = None
-            price_raw = (item.get("Price (₹)") or "").strip()
-            if price_raw:
-                parts = [p.strip() for p in price_raw.split("-")]
-                try:
-                    low = Decimal(parts[0].replace(",", ""))
-                    high = Decimal(parts[1].replace(",", "")) if len(parts) > 1 else low
-                    price_range = PriceRange(low=Money(low, "INR"), high=Money(high, "INR"))
-                    if len(parts) == 1:
-                        offer_price = Money(low, "INR")
-                except Exception:
-                    price_range = None
-
-            expected_raise = self._parse_size(item.get("IPO Size"))
-
-            return IPODetails(
-                symbol=symbol,
-                company_name=name,
-                exchange=exchange,
-                expected_date=expected_date,
-                listed_date=listing_date,
-                status=status.value,
-                price_range=price_range,
-                offer_price=offer_price,
-                expected_raise=expected_raise,
-                sector=Sector.UNCLASSIFIED,
-                industry=Industry.OTHER,
-            )
-        except Exception:
-            return None
-
     @staticmethod
     def _to_symbol(name: str) -> str:
         """Convert an IPO name to an uppercase alphanumeric symbol."""
@@ -476,29 +187,15 @@ Return structured data for each IPO found. Be thorough but avoid duplicates."""
         try:
             number = Decimal(match.group(1).replace(",", ""))
             unit = (match.group(2) or "").upper()
-            multiplier = {"CR": Decimal("10000000"), "CRORE": Decimal("10000000"),
-                          "L": Decimal("100000"), "LAKH": Decimal("100000"),
-                          "K": Decimal("1000")}.get(unit, Decimal("1"))
+            multiplier = {
+                "CR": Decimal("10000000"), "CRORE": Decimal("10000000"),
+                "L": Decimal("100000"), "LAKH": Decimal("100000"),
+                "K": Decimal("1000"),
+            }.get(unit, Decimal("1"))
             return Money(number * multiplier, "INR")
         except Exception:
             return None
 
-    async def _enrich_ipos(self, ipos: List[IPODetails]) -> List[IPODetails]:
-        """Enrich IPOs with additional data."""
-        # In production, this would fetch additional details
-        # like company profiles, financials, etc.
-        return ipos
-    
-    def _deduplicate_ipos(self, ipos: List[IPODetails]) -> List[IPODetails]:
-        """Remove duplicate IPOs based on symbol."""
-        seen = set()
-        unique = []
-        for ipo in ipos:
-            if ipo.symbol not in seen:
-                seen.add(ipo.symbol)
-                unique.append(ipo)
-        return unique
-    
     def _map_sector(self, sector: str) -> Sector:
         """Map sector string to enum."""
         sector_lower = sector.lower()

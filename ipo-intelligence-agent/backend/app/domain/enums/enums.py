@@ -13,6 +13,10 @@ class IPOStatus(str, Enum):
     WITHDRAWN = "withdrawn"
     POSTPONED = "postponed"
     CANCELLED = "cancelled"
+    # Special states for missing data
+    NOT_ANNOUNCED = "not_announced"
+    NOT_AVAILABLE = "not_available"
+    NOT_APPLICABLE = "not_applicable"
 
 
 class Exchange(str, Enum):
@@ -145,6 +149,7 @@ class AgentStatus(str, Enum):
     FAILED = "failed"
     TIMEOUT = "timeout"
     RETRYING = "retrying"
+    INSUFFICIENT_DATA = "insufficient_data"
 
 
 class RiskLevel(str, Enum):
@@ -339,6 +344,16 @@ class VerificationStatus(str, Enum):
     VERIFIED = "verified"
     DISPUTED = "disputed"
     OUTDATED = "outdated"
+
+
+class DataAvailability(str, Enum):
+    """Field-level data availability status."""
+    AVAILABLE = "available"
+    NOT_ANNOUNCED = "not_announced"
+    NOT_AVAILABLE = "not_available"
+    NOT_APPLICABLE = "not_applicable"
+    PARTIAL = "partial"
+    ESTIMATED = "estimated"
 
 
 # Helper functions

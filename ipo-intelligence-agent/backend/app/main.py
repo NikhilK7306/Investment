@@ -10,7 +10,7 @@ from app.core.logging.config import configure_logging as setup_logging
 from app.core.tracing.config import setup_tracing
 from app.core.metrics.prometheus import setup_metrics
 from app.infrastructure.database.session import init_database, close_database
-from app.presentation.api import ipos, analysis, memory
+from app.presentation.api import ipos, analysis, memory, chat
 
 
 @asynccontextmanager
@@ -87,6 +87,7 @@ def create_app() -> FastAPI:
     app.include_router(ipos.router, prefix="/api/v1/ipos", tags=["IPOs"])
     app.include_router(analysis.router, prefix="/api/v1/analysis", tags=["Analysis"])
     app.include_router(memory.router, prefix="/api/v1/memory", tags=["Memory & Reflection"])
+    app.include_router(chat.router, prefix="/api/v1/chat", tags=["Chat"])
     
     return app
 

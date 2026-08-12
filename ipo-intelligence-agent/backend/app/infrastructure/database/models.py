@@ -152,6 +152,8 @@ class FinancialStatementModel(Base):
     fcf_growth_yoy: Mapped[Optional[Decimal]] = mapped_column(Numeric(5, 4))
 
     source: Mapped[str] = mapped_column(String(100), default="")
+    source_reference: Mapped[str] = mapped_column(String(500), default="")
+    source_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     verified: Mapped[bool] = mapped_column(Boolean, default=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
     extra_data: Mapped[Dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
@@ -195,11 +197,25 @@ class IPOModel(Base):
     overallotment_option: Mapped[bool] = mapped_column(Boolean, default=False)
     overallotment_shares: Mapped[Optional[int]] = mapped_column(Integer)
 
+    # Issue Details
+    issue_size: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2))
+    face_value: Mapped[Optional[Decimal]] = mapped_column(Numeric(10, 2))
+    lot_size: Mapped[Optional[int]] = mapped_column(Integer)
+    registrar: Mapped[str] = mapped_column(String(255), default="")
+
     # Valuation
     expected_valuation_low: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2))
     expected_valuation_high: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2))
     priced_valuation: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2))
     post_money_valuation: Mapped[Optional[Decimal]] = mapped_column(Numeric(20, 2))
+
+    # Source tracking
+    source: Mapped[str] = mapped_column(String(100), default="")
+    source_reference: Mapped[str] = mapped_column(String(500), default="")
+    source_updated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
+    collector_version: Mapped[str] = mapped_column(String(50), default="")
+    data_quality_score: Mapped[float] = mapped_column(default=0.0)
+    last_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
 
     # Underwriters
     lead_underwriters: Mapped[List[str]] = mapped_column(ARRAY(String), default=list)
@@ -268,6 +284,11 @@ class AnalysisModel(Base):
 
     completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True))
     model_version: Mapped[str] = mapped_column(String(50), default="")
+    # LLM metadata
+    llm_provider: Mapped[str] = mapped_column(String(50), default="")
+    llm_model: Mapped[str] = mapped_column(String(100), default="")
+    tokens_used: Mapped[int] = mapped_column(Integer, default=0)
+    cost_usd: Mapped[Decimal] = mapped_column(Numeric(10, 6), default=Decimal("0"))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), onupdate=func.now())
     extra_data: Mapped[Dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
@@ -668,3 +689,53 @@ class DomainEventModel(Base):
     __table_args__ = (
         Index("ix_events_aggregate_version", "aggregate_id", "version"),
     )
+
+
+# Chat Models
+class ConversationModel(Base):
+    """Chat conversation model."""
+    __tablename__ = "conversations"
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    user_id: Mapped[Optional[str]] = mapped_column(String(255), index=True)  # Optional, no auth required
+    session_id: Mapped[str] = mapped_column(String(255), index=True)
+    ipo_symbol: Mapped[Optional[str]] = mapped_column(String(20), index=True)
+    title: Mapped[str] = mapped_column(String(255), default="")
+    context_data: Mapped[Dict[str, Any]] = mapped_column(JSONB, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), index=True)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), onupdate=func.now())
+
+    # Relationships
+    messages: Mapped[List["ChatMessageModel"]] = relationship(back_populates="conversation", lazy="dynamic", cascade="all, delete-orphan")
+
+
+class ChatMessageModel(Base):
+    """Chat message model."""
+    __tablename__ = "chat_messages"
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    conversation_id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), ForeignKey("conversations.id"), index=True)
+    role: Mapped[str] = mapped_column(String(20), nullable=False)  # user, assistant, system
+    content: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_name: Mapped[Optional[str]] = mapped_column(String(50))
+    ipo_symbol: Mapped[Optional[str]] = mapped_column(String(20), index=True)
+    message_metadata: Mapped[Dict[str, Any]] = mapped_column("metadata", JSONB, default=dict)
+    tokens_used: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), index=True)
+
+    # Relationships
+    conversation: Mapped["ConversationModel"] = relationship(back_populates="messages")
+
+
+# Settings Model (deployment-level, no user auth required)
+class DeploymentSettingsModel(Base):
+    """Deployment settings model for system-wide configuration."""
+    __tablename__ = "deployment_settings"
+
+    id: Mapped[UUID] = mapped_column(PGUUID(as_uuid=True), primary_key=True, default=uuid4)
+    key: Mapped[str] = mapped_column(String(100), unique=True, index=True, nullable=False)
+    value: Mapped[Dict[str, Any]] = mapped_column(JSONB, default=dict)
+    description: Mapped[str] = mapped_column(Text, default="")
+    is_sensitive: Mapped[bool] = mapped_column(Boolean, default=False)  # Don't expose in frontend
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now(), onupdate=func.now())

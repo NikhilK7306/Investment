@@ -32,6 +32,7 @@ from app.domain.enums.enums import (
     TimeHorizon,
     AgentName,
     AgentStatus,
+    DataAvailability,
 )
 from app.agents.base import AgentContext
 from app.agents.fundamental.agent import FundamentalAnalysisAgent
@@ -39,6 +40,7 @@ from app.agents.market.agent import MarketAnalysisAgent
 from app.agents.sentiment.agent import SentimentAnalysisAgent
 from app.agents.risk.agent import RiskAnalysisAgent
 from app.agents.decision.agent import DecisionSupportAgent
+from app.core.exceptions.base import InsufficientDataError
 
 
 class AnalyzeIPOUseCase:
@@ -86,6 +88,11 @@ class AnalyzeIPOUseCase:
         if not ipo:
             raise ValueError(f"IPO not found for symbol: {symbol}")
 
+        # Check for existing analysis (running or recently completed)
+        existing_analysis = await self._get_existing_analysis(symbol)
+        if existing_analysis:
+            return existing_analysis
+
         # Create analysis record (in-flight RUNNING state)
         analysis_id = await self.analysis_repo.save_analysis(
             symbol=symbol,
@@ -111,6 +118,8 @@ class AnalyzeIPOUseCase:
                 "error": str(e),
                 "completed_at": datetime.utcnow(),
             })
+            # Flush to ensure the failed analysis is persisted before re-raising
+            await self.analysis_repo.session.flush()
             raise
 
         # Update analysis with results
@@ -141,6 +150,22 @@ class AnalyzeIPOUseCase:
         })
 
         return overall_analysis
+
+    async def _get_existing_analysis(self, symbol: str) -> Optional[OverallAnalysis]:
+        """Check for existing analysis (running or completed)."""
+        # Check for running analysis
+        running_analysis = await self.analysis_repo.get_running_analysis(symbol)
+        if running_analysis:
+            return running_analysis
+
+        # Check for ANY completed analysis (not just recent)
+        completed_analysis = await self.analysis_repo.get_latest_analysis(symbol)
+        if completed_analysis and completed_analysis.get("status") == AnalysisStatus.COMPLETED.value:
+            # Existing analysis is stored as dict - force new analysis to use updated pipeline
+            # Return None to force re-analysis with improved data quality checks
+            pass
+
+        return None
 
     @staticmethod
     def _serialize_metrics(metrics: FinancialMetrics) -> Dict[str, Any]:
@@ -207,6 +232,24 @@ class AnalyzeIPOUseCase:
         user_id: Optional[str],
     ) -> OverallAnalysis:
         """Run the fundamental/market/sentiment/risk agents, then synthesize."""
+        
+        # ============================================================
+        # DATA QUALITY VALIDATION GATE
+        # ============================================================
+        # Before running agents, validate that we have sufficient verified data
+        # to produce a meaningful analysis. If critical data is missing,
+        # return INSUFFICIENT_DATA instead of generating generic analysis.
+        
+        data_quality = self._assess_data_quality(symbol, financials, company)
+        
+        if data_quality["overall_score"] < 0.4:  # Minimum 40% data quality threshold
+            missing = data_quality["missing"]
+            available = data_quality["available"]
+            raise InsufficientDataError(
+                ipo_symbol=symbol,
+                missing_data=missing,
+            )
+        
         context = AgentContext(
             ipo_symbol=symbol.upper(),
             analysis_id=analysis_id,
@@ -215,12 +258,10 @@ class AnalyzeIPOUseCase:
         )
 
         serialized_financials = [self._serialize_metrics(m) for m in financials if m]
-        industry_data = {
-            "market_cagr": 0.12,
-            "lifecycle": "growth",
-            "tailwinds": ["Sector tailwinds", "Rising investor interest"],
-            "headwinds": [],
-        }
+        
+        # Build industry data from actual company/market data if available, 
+        # otherwise mark as NOT_AVAILABLE
+        industry_data = self._build_industry_data(company, serialized_financials)
 
         agent_specs = [
             ("fundamental", FundamentalAnalysisAgent(), {
@@ -259,6 +300,25 @@ class AnalyzeIPOUseCase:
             for (name, _, _), result in zip(agent_specs, gathered)
         }
 
+        # ============================================================
+        # VALIDATE UPSTREAM AGENT OUTPUTS BEFORE DECISION
+        # ============================================================
+        # Check if critical agents have INSUFFICIENT_DATA
+        critical_agents = ["fundamental", "market", "risk"]
+        insufficient_count = sum(
+            1 for name in critical_agents
+            if agent_map[name].status == AgentStatus.INSUFFICIENT_DATA
+        )
+        
+        if insufficient_count >= 2:
+            # 2 or more critical agents lack sufficient data
+            missing_agents = [name for name in critical_agents 
+                             if agent_map[name].status == AgentStatus.INSUFFICIENT_DATA]
+            raise InsufficientDataError(
+                f"Cannot synthesize decision: {len(missing_agents)} critical agents have insufficient data: {', '.join(missing_agents)}",
+                missing_data=missing_agents,
+            )
+
         # Synthesize with the Decision agent using whatever completed
         key_names = {
             "fundamental": "fundamental_analysis",
@@ -269,7 +329,15 @@ class AnalyzeIPOUseCase:
         decision_input = {}
         for name, key in key_names.items():
             result = agent_map[name]
-            decision_input[key] = (result.data or {}) if result.status == AgentStatus.COMPLETED else {}
+            # Include data quality info for Decision agent
+            decision_input[key] = {
+                **(result.data or {}),
+                "data_quality": "sufficient" if result.status == AgentStatus.COMPLETED else "insufficient",
+                "agent_status": result.status.value,
+            } if result.status == AgentStatus.COMPLETED else {
+                "data_quality": "insufficient",
+                "agent_status": result.status.value,
+            }
 
         decision_result = await DecisionSupportAgent().run_with_retry(context, decision_input)
         if decision_result.status != AgentStatus.COMPLETED or not decision_result.data:
@@ -323,6 +391,94 @@ class AnalyzeIPOUseCase:
             completed_at=datetime.utcnow(),
             model_version="2.0.0",
         )
+
+    def _assess_data_quality(
+        self,
+        symbol: str,
+        financials: List[FinancialMetrics],
+        company: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Assess data quality before running analysis pipeline."""
+        missing = []
+        available = []
+        score = 0.0
+        max_score = 0.0
+        
+        # Financial data (weight: 40%)
+        max_score += 0.4
+        if financials and len(financials) > 0:
+            available.append(f"financial_statements ({len(financials)} periods)")
+            score += 0.4
+            if len(financials) >= 4:
+                score += 0.1  # Bonus for sufficient history
+        else:
+            missing.append("financial_statements")
+        
+        # Company profile (weight: 15%)
+        max_score += 0.15
+        if company and company.get("common_name") and company.get("ticker"):
+            available.append("company_profile")
+            score += 0.15
+        else:
+            missing.append("company_profile")
+        
+        # IPO details (weight: 15%)
+        max_score += 0.15
+        ipo = None
+        # Note: We don't have ipo object here, but we can check company for ipo info
+        if company and company.get("ipo_date"):
+            available.append("ipo_details")
+            score += 0.15
+        else:
+            missing.append("ipo_details")
+        
+        # Market data / Industry info (weight: 15%)
+        max_score += 0.15
+        if company and (company.get("sector") or company.get("industry")):
+            available.append("industry_data")
+            score += 0.15
+        else:
+            missing.append("industry_data")
+        
+        # News/Sentiment (weight: 15%)
+        max_score += 0.15
+        # Note: News is collected separately, we'll assume partial availability
+        missing.append("news_sentiment")
+        
+        overall_score = score / max_score if max_score > 0 else 0.0
+        
+        return {
+            "overall_score": min(1.0, overall_score),
+            "missing": missing,
+            "available": available,
+        }
+
+    def _build_industry_data(
+        self,
+        company: Dict[str, Any],
+        financials: List[Dict],
+    ) -> Dict[str, Any]:
+        """Build industry data from available company/market information.
+        
+        If verified data is unavailable, mark fields as NOT_AVAILABLE
+        instead of using hardcoded generic values.
+        """
+        industry_data = {
+            "market_cagr": DataAvailability.NOT_AVAILABLE.value,
+            "lifecycle": DataAvailability.NOT_AVAILABLE.value,
+            "tailwinds": [],
+            "headwinds": [],
+            "source": "not_available",
+        }
+        
+        # If we have company sector/industry, we could look up benchmarks
+        # but for now, explicitly mark as NOT_AVAILABLE to avoid generic fallbacks
+        if company.get("sector"):
+            industry_data["sector"] = company.get("sector")
+        if company.get("industry"):
+            industry_data["industry"] = company.get("industry")
+            
+        return industry_data
 
 
 class GetAnalysisUseCase:

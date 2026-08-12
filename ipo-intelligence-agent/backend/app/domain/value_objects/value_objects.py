@@ -353,6 +353,20 @@ class IPODetails:
     prospectus_url: str = ""
     sec_cik: str = ""
     company_id: Optional[UUID] = None
+    # Source attribution
+    source: str = ""
+    source_reference: str = ""
+    source_updated_at: Optional[datetime] = None
+    collector_version: str = ""
+    data_quality_score: float = 0.0
+    last_verified_at: Optional[datetime] = None
+    # Database metadata
+    created_at: Optional[datetime] = None
+    # Issue details
+    issue_size: Optional[Money] = None
+    face_value: Optional[Money] = None
+    lot_size: Optional[int] = None
+    registrar: str = ""
     
     def to_dict(self) -> dict:
         result = {

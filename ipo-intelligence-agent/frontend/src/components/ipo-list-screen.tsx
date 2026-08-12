@@ -10,7 +10,7 @@ import { Input } from "@/components/ui/input";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table";
-import { Search, Calendar, RefreshCw, ExternalLink, BarChart2, FileText, Rocket } from "lucide-react";
+import { Search, Calendar, RefreshCw, ExternalLink, BarChart2, FileText, Rocket, AlertCircle, Info, ShieldCheck } from "lucide-react";
 import { ipoService } from "@/services/ipoService";
 import type { IPOResponse } from "@/types/ipo";
 
@@ -21,6 +21,18 @@ const statusColors: Record<string, string> = {
   LISTED: "success",
   WITHDRAWN: "destructive",
   POSTPONED: "secondary",
+};
+
+const qualityColors: Record<string, string> = {
+  high: "success",
+  medium: "default",
+  low: "destructive",
+};
+
+const qualityLabels: Record<string, string> = {
+  high: "High",
+  medium: "Medium",
+  low: "Low",
 };
 
 type Phase = "upcoming" | "current" | "listed";
@@ -232,8 +244,11 @@ export default function IPOListScreen({
                           <TableHead>Company</TableHead>
                           <TableHead>Exchange</TableHead>
                           <TableHead>Sector</TableHead>
+                          <TableHead>Industry</TableHead>
                           <TableHead>Expected Date</TableHead>
                           <TableHead>Status</TableHead>
+                          <TableHead>Data Quality</TableHead>
+                          <TableHead>Source</TableHead>
                           <TableHead>Price</TableHead>
                           <TableHead className="w-32">Actions</TableHead>
                         </TableRow>
@@ -241,14 +256,14 @@ export default function IPOListScreen({
                       <TableBody>
                         {loading && (
                           <TableRow>
-                            <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
+                            <TableCell colSpan={10} className="text-center text-muted-foreground py-8">
                               Loading IPOs...
                             </TableCell>
                           </TableRow>
                         )}
                         {!loading && filtered.length === 0 && (
                           <TableRow>
-                            <TableCell colSpan={7} className="text-center text-muted-foreground py-8">
+                            <TableCell colSpan={10} className="text-center text-muted-foreground py-8">
                               No {PHASE_LABELS[p].toLowerCase()} IPOs found.
                               {region === "foreign" && p === "upcoming" && " Run Discover to fetch the latest offerings."}
                             </TableCell>
@@ -260,6 +275,25 @@ export default function IPOListScreen({
                               <div>
                                 <p className="font-medium">{ipo.symbol}</p>
                                 <p className="text-sm text-muted-foreground">{ipo.company_name}</p>
+                                {/* Missing data warnings */}
+                                {!ipo.price_range && (
+                                  <p className="text-xs text-amber-600 flex items-center gap-1">
+                                    <AlertCircle className="h-3 w-3" />
+                                    No price range available
+                                  </p>
+                                )}
+                                {!ipo.source && (
+                                  <p className="text-xs text-amber-600 flex items-center gap-1">
+                                    <AlertCircle className="h-3 w-3" />
+                                    No source attribution
+                                  </p>
+                                )}
+                                {!ipo.data_quality_score && (
+                                  <p className="text-xs text-amber-600 flex items-center gap-1">
+                                    <AlertCircle className="h-3 w-3" />
+                                    No quality assessment
+                                  </p>
+                                )}
                               </div>
                             </TableCell>
                             <TableCell>
@@ -271,6 +305,9 @@ export default function IPOListScreen({
                               <Badge variant="secondary" className="text-xs">{ipo.sector || "N/A"}</Badge>
                             </TableCell>
                             <TableCell>
+                              <Badge variant="secondary" className="text-xs">{ipo.industry || "N/A"}</Badge>
+                            </TableCell>
+                            <TableCell>
                               <span className="text-sm">
                                 {ipo.expected_date ? new Date(ipo.expected_date).toLocaleDateString() : "TBD"}
                               </span>
@@ -279,6 +316,32 @@ export default function IPOListScreen({
                               <Badge variant={(statusColors[ipo.status] || "default") as "default" | "outline" | "success" | "destructive" | "secondary"}>
                                 {ipo.status}
                               </Badge>
+                            </TableCell>
+                            <TableCell>
+                              {ipo.data_quality_score !== null && ipo.data_quality_score !== undefined ? (
+                                <Badge variant={(qualityColors[ipo.data_quality_score >= 0.8 ? "high" : ipo.data_quality_score >= 0.5 ? "medium" : "low"]) as "default" | "outline" | "success" | "destructive" | "secondary"}>
+                                  <ShieldCheck className="h-3 w-3 mr-1" />
+                                  {qualityLabels[ipo.data_quality_score >= 0.8 ? "high" : ipo.data_quality_score >= 0.5 ? "medium" : "low"]}
+                                </Badge>
+                              ) : (
+                                <Badge variant="outline" className="text-xs">
+                                  <AlertCircle className="h-3 w-3 mr-1" />
+                                  Unassessed
+                                </Badge>
+                              )}
+                            </TableCell>
+                            <TableCell>
+                              {ipo.source ? (
+                                <div className="flex items-center gap-1">
+                                  <Info className="h-3 w-3 text-muted-foreground" />
+                                  <span className="text-xs text-muted-foreground">{ipo.source}</span>
+                                </div>
+                              ) : (
+                                <Badge variant="outline" className="text-xs">
+                                  <AlertCircle className="h-3 w-3 mr-1" />
+                                  No Source
+                                </Badge>
+                              )}
                             </TableCell>
                             <TableCell>
                               <span className="text-sm font-medium">{formatPrice(ipo)}</span>

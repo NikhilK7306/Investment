@@ -1,27 +1,62 @@
-"""Risk Analysis Agent - Identifies and quantifies investment risks."""
+"""Risk Analysis Agent - Identifies and quantifies investment risks using LLM."""
 
+import json
 from datetime import datetime
+from decimal import Decimal
 from typing import Any, Dict, List, Optional
+from uuid import UUID
+
+from pydantic import BaseModel, Field
 
 from app.agents.base import BaseAgent, AgentContext, AgentResult
 from app.domain.enums.enums import AgentName, AgentStatus, RiskLevel
-from app.domain.value_objects.value_objects import RiskFactor
-from app.domain.value_objects.value_objects import Percentage
+from app.domain.value_objects.value_objects import RiskFactor, Percentage
 from app.core.exceptions.base import AgentError
+from app.infrastructure.ai_models import LLMProviderFactory, LLMConfig, LLMProviderType
+
+
+class RiskFactorOutput(BaseModel):
+    """Individual risk factor output."""
+    category: str
+    factor: str
+    severity: str = Field(pattern="^(VERY_LOW|LOW|MODERATE|HIGH|VERY_HIGH|EXTREME)$")
+    probability: float = Field(ge=0, le=1)
+    impact: float = Field(ge=0, le=1)
+    risk_score: float = Field(ge=0)
+    description: str
+    evidence: List[str] = []
+    mitigation: str = ""
+
+
+class RiskAnalysisOutput(BaseModel):
+    """Structured output for risk analysis."""
+    overall_risk_level: str = Field(pattern="^(VERY_LOW|LOW|MODERATE|HIGH|VERY_HIGH|EXTREME)$")
+    overall_risk_score: float = Field(ge=0, le=100)
+    risk_count: int
+    high_priority_risks: int
+    top_risks: List[RiskFactorOutput]
+    all_risks: List[RiskFactorOutput]
+    risk_by_category: Dict[str, List[RiskFactorOutput]]
+    scenarios: Dict[str, Dict[str, Any]]
+    red_flags: List[str]
+    mitigation_summary: Dict[str, List[str]]
+    reasoning: str
+    confidence: float = Field(ge=0, le=1)
 
 
 class RiskAnalysisAgent(BaseAgent[Dict[str, Any], Dict[str, Any]]):
-    """Agent that performs comprehensive risk analysis."""
-    
+    """Agent that performs comprehensive risk analysis using LLM."""
+
     def __init__(self):
         super().__init__(
             name=AgentName.RISK,
-            description="Identifies and quantifies financial, market, operational, and regulatory risks",
-            version="1.0.0",
+            description="Identifies and quantifies financial, market, operational, and regulatory risks using LLM",
+            version="2.0.0",
             max_retries=2,
             timeout_seconds=180,
         )
-    
+        self._llm_provider = None
+
     @property
     def system_prompt(self) -> str:
         return """You are a senior risk analyst specializing in pre-IPO risk assessment.
@@ -92,8 +127,10 @@ OUTPUT:
 - Top 10 risks ranked by score
 - Risk heatmap
 - Scenario analysis (base/bear/bull)
-- Red flags requiring immediate attention"""
-    
+- Red flags requiring immediate attention
+
+CRITICAL: Use ONLY the supplied verified data. If information is unavailable, return null/Not Available. Do NOT infer or fabricate factual values. Distinguish clearly between verified facts and your analytical interpretation."""
+
     @property
     def available_tools(self) -> List[str]:
         return [
@@ -106,79 +143,88 @@ OUTPUT:
             "calculate_risk_scores",
             "generate_risk_heatmap",
         ]
-    
+
+    def _get_llm_provider(self):
+        if self._llm_provider is None:
+            self._llm_provider = LLMProviderFactory.create_from_env()
+        return self._llm_provider
+
     async def execute(
         self,
         context: AgentContext,
         input_data: Dict[str, Any],
     ) -> AgentResult[Dict[str, Any]]:
-        """Execute risk analysis."""
         start_time = datetime.utcnow()
-        
+
         try:
-            # Extract data
             financials = input_data.get("financials", [])
             company_profile = input_data.get("company_profile", {})
             market_analysis = input_data.get("market_analysis", {})
             competitive_analysis = input_data.get("competitive_analysis", {})
             legal_data = input_data.get("legal_data", {})
             ipo_details = input_data.get("ipo_details", {})
-            
-            # Parse latest financials
-            latest = financials[0] if financials else {}
-            
-            # Analyze each risk category
-            financial_risks = self._analyze_financial_risks(latest, financials, ipo_details)
-            market_risks = self._analyze_market_risks(market_analysis, competitive_analysis, company_profile)
-            operational_risks = self._analyze_operational_risks(company_profile, financials)
-            regulatory_risks = self._analyze_regulatory_risks(legal_data, company_profile)
-            governance_risks = self._analyze_governance_risks(company_profile, ipo_details)
-            post_ipo_risks = self._analyze_post_ipo_risks(ipo_details, company_profile)
-            
-            # Combine all risks
-            all_risks = (
-                financial_risks + market_risks + operational_risks +
-                regulatory_risks + governance_risks + post_ipo_risks
+
+            # Check for critical missing data
+            if not financials:
+                return AgentResult(
+                    agent_name=self.name,
+                    status=AgentStatus.INSUFFICIENT_DATA,
+                    error="No financial data provided for risk analysis",
+                    error_type="INSUFFICIENT_DATA",
+                    data={"data_quality": "none", "reason": "Missing financial statements"},
+                )
+
+            if not company_profile or not company_profile.get("common_name"):
+                return AgentResult(
+                    agent_name=self.name,
+                    status=AgentStatus.INSUFFICIENT_DATA,
+                    error="No company profile data provided",
+                    error_type="INSUFFICIENT_DATA",
+                    data={"data_quality": "insufficient", "reason": "Missing company profile"},
+                )
+
+            provider = self._get_llm_provider()
+            await provider.initialize()
+
+            risk_summary = self._prepare_risk_summary(
+                financials, company_profile, market_analysis, 
+                competitive_analysis, legal_data, ipo_details
             )
-            
-            # Calculate scores and rank
-            ranked_risks = self._rank_risks(all_risks)
-            
-            # Determine overall risk level
-            overall_risk = self._determine_overall_risk(ranked_risks)
-            
-            # Generate scenarios
-            scenarios = self._generate_scenarios(ranked_risks, latest)
-            
-            # Identify red flags
-            red_flags = self._identify_red_flags(ranked_risks)
-            
-            result_data = {
-                "overall_risk_level": overall_risk.value,
-                "overall_risk_score": self._calculate_overall_score(ranked_risks),
-                "risk_count": len(all_risks),
-                "high_priority_risks": len([r for r in ranked_risks if r.severity in [RiskLevel.HIGH, RiskLevel.VERY_HIGH, RiskLevel.EXTREME]]),
-                "top_risks": [r.to_dict() for r in ranked_risks[:10]],
-                "all_risks": [r.to_dict() for r in ranked_risks],
-                "risk_by_category": self._group_by_category(ranked_risks),
-                "scenarios": scenarios,
-                "red_flags": red_flags,
-                "mitigation_summary": self._summarize_mitigations(ranked_risks),
-            }
-            
+
+            prompt = self._create_analysis_prompt(risk_summary)
+
+            response = await provider.complete(
+                prompt=prompt,
+                system_prompt=self.system_prompt,
+                temperature=0.1,
+                max_tokens=4000,
+                response_model=RiskAnalysisOutput,
+            )
+
+            if isinstance(response.content, str):
+                try:
+                    analysis_data = json.loads(response.content)
+                except json.JSONDecodeError:
+                    analysis_data = self._extract_json(response.content)
+            else:
+                analysis_data = response.content
+
+            analysis = RiskAnalysisOutput(**analysis_data)
+
             duration = (datetime.utcnow() - start_time).total_seconds() * 1000
-            confidence = self._calculate_confidence(financials, company_profile, legal_data)
-            
+
             return AgentResult(
                 agent_name=self.name,
                 status=AgentStatus.COMPLETED,
-                data=result_data,
-                confidence=confidence,
-                reasoning=self._generate_reasoning(result_data),
-                evidence=self._collect_evidence(ranked_risks),
+                data=analysis.model_dump(),
+                confidence=analysis.confidence,
+                reasoning=analysis.reasoning,
+                evidence=self._collect_evidence(risk_summary),
                 duration_ms=duration,
+                tokens_used=response.tokens_used,
+                cost_usd=response.cost_usd,
             )
-            
+
         except Exception as e:
             duration = (datetime.utcnow() - start_time).total_seconds() * 1000
             return AgentResult(
@@ -188,587 +234,156 @@ OUTPUT:
                 error_type=type(e).__name__,
                 duration_ms=duration,
             )
-    
-    def _analyze_financial_risks(
+
+    def _prepare_risk_summary(
         self,
-        latest: Dict,
-        history: List[Dict],
-        ipo_details: Dict,
-    ) -> List[RiskFactor]:
-        """Analyze financial risks."""
-        risks = []
-        
-        # Revenue concentration
-        rev_concentration = latest.get("revenue_concentration", {})
-        top_customer_pct = rev_concentration.get("top_customer_pct", 0)
-        top_5_customers_pct = rev_concentration.get("top_5_customers_pct", 0)
-        
-        if top_customer_pct > 0.3:
-            risks.append(RiskFactor(
-                category="Financial",
-                factor="Revenue Concentration - Single Customer",
-                severity=RiskLevel.HIGH if top_customer_pct > 0.5 else RiskLevel.MODERATE,
-                probability=Percentage.from_decimal(0.7),
-                impact=Percentage.from_decimal(0.8),
-                description=f"Top customer represents {top_customer_pct:.0%} of revenue",
-                evidence=[f"Top customer: {top_customer_pct:.0%}", f"Top 5: {top_5_customers_pct:.0%}"],
-                mitigation="Diversify customer base; negotiate longer contracts",
-            ))
-        
-        # Margin compression
-        gross_margin = latest.get("gross_margin")
-        if gross_margin and gross_margin < 0.5:
-            risks.append(RiskFactor(
-                category="Financial",
-                factor="Low Gross Margin",
-                severity=RiskLevel.MODERATE,
-                probability=Percentage.from_decimal(0.6),
-                impact=Percentage.from_decimal(0.5),
-                description=f"Gross margin of {gross_margin:.1%} limits profitability buffer",
-                evidence=[f"Gross margin: {gross_margin:.1%}"],
-                mitigation="Focus on higher-margin products; improve pricing power",
-            ))
-        
-        # Margin trend
-        if len(history) >= 2:
-            prev_margin = history[1].get("gross_margin", 0)
-            if gross_margin and gross_margin < prev_margin - 0.05:
-                risks.append(RiskFactor(
-                    category="Financial",
-                    factor="Margin Compression",
-                    severity=RiskLevel.HIGH,
-                    probability=Percentage.from_decimal(0.8),
-                    impact=Percentage.from_decimal(0.7),
-                    description=f"Gross margin declined {prev_margin - gross_margin:.1%} YoY",
-                    evidence=[f"Previous: {prev_margin:.1%}", f"Current: {gross_margin:.1%}"],
-                    mitigation="Identify cost drivers; renegotiate supplier contracts",
-                ))
-        
-        # Debt levels
-        total_debt = latest.get("total_debt", 0)
-        ebitda = latest.get("ebitda", 1)
-        debt_to_ebitda = total_debt / ebitda if ebitda > 0 else 999
-        
-        if debt_to_ebitda > 5:
-            risks.append(RiskFactor(
-                category="Financial",
-                factor="High Leverage",
-                severity=RiskLevel.HIGH if debt_to_ebitda > 7 else RiskLevel.MODERATE,
-                probability=Percentage.from_decimal(0.7),
-                impact=Percentage.from_decimal(0.8),
-                description=f"Debt/EBITDA of {debt_to_ebitda:.1f}x exceeds comfort zone",
-                evidence=[f"Debt/EBITDA: {debt_to_ebitda:.1f}x", f"Total debt: ${total_debt:,.0f}"],
-                mitigation="Use IPO proceeds to pay down debt; refinance at lower rates",
-            ))
-        
-        # Cash burn
-        fcf = latest.get("free_cash_flow", 0)
-        cash = latest.get("cash_and_equivalents", 0)
-        if fcf < 0 and cash > 0:
-            runway = cash / abs(fcf) if fcf != 0 else 999
-            if runway < 12:
-                risks.append(RiskFactor(
-                    category="Financial",
-                    factor="Cash Runway Risk",
-                    severity=RiskLevel.VERY_HIGH if runway < 6 else RiskLevel.HIGH,
-                    probability=Percentage.from_decimal(0.9),
-                    impact=Percentage.from_decimal(0.9),
-                    description=f"Only {runway:.0f} months of runway at current burn",
-                    evidence=[f"Cash: ${cash:,.0f}", f"Monthly burn: ${abs(fcf)/12:,.0f}"],
-                    mitigation="IPO proceeds critical; reduce discretionary spend",
-                ))
-        
-        # Revenue growth deceleration
-        if len(history) >= 3:
-            rev_growth = [h.get("revenue_growth_yoy", 0) for h in history[:3]]
-            if rev_growth[0] < rev_growth[1] < rev_growth[2]:
-                risks.append(RiskFactor(
-                    category="Financial",
-                    factor="Revenue Growth Deceleration",
-                    severity=RiskLevel.MODERATE,
-                    probability=Percentage.from_decimal(0.7),
-                    impact=Percentage.from_decimal(0.6),
-                    description="Revenue growth slowing for 3+ consecutive periods",
-                    evidence=[f"Growth trend: {rev_growth[2]:.1%} → {rev_growth[1]:.1%} → {rev_growth[0]:.1%}"],
-                    mitigation="New product launches; market expansion; M&A",
-                ))
-        
-        return risks
-    
-    def _analyze_market_risks(
-        self,
+        financials: List,
+        company_profile: Dict,
         market_analysis: Dict,
         competitive_analysis: Dict,
-        company_profile: Dict,
-    ) -> List[RiskFactor]:
-        """Analyze market risks."""
-        risks = []
-        
-        # TAM realism
-        tam = market_analysis.get("tam_analysis", {})
-        tam_score = tam.get("score", 50)
-        if tam_score < 40:
-            risks.append(RiskFactor(
-                category="Market",
-                factor="Limited Market Opportunity",
-                severity=RiskLevel.MODERATE,
-                probability=Percentage.from_decimal(0.6),
-                impact=Percentage.from_decimal(0.7),
-                description=f"TAM attractiveness score low: {tam_score}/100",
-                evidence=[f"TAM score: {tam_score}", f"TAM: {tam.get('tam_formatted', 'N/A')}"],
-                mitigation="Validate TAM assumptions; explore adjacent markets",
-            ))
-        
-        # Competitive intensity
-        comp = competitive_analysis.get("competitive_analysis", {})
-        intensity = comp.get("intensity", "moderate")
-        if intensity in ["high", "very_high"]:
-            risks.append(RiskFactor(
-                category="Market",
-                factor="Intense Competition",
-                severity=RiskLevel.HIGH if intensity == "very_high" else RiskLevel.MODERATE,
-                probability=Percentage.from_decimal(0.8),
-                impact=Percentage.from_decimal(0.7),
-                description=f"Competitive intensity: {intensity} ({comp.get('total_competitors', 0)} competitors)",
-                evidence=[f"Competitors: {comp.get('total_competitors', 0)}", f"Direct: {comp.get('direct_competitors', 0)}"],
-                mitigation="Strengthen differentiation; build switching costs; focus on niche",
-            ))
-        
-        # Weak moat
-        moat = comp.get("moat_strength", "moderate")
-        if moat == "weak":
-            risks.append(RiskFactor(
-                category="Market",
-                factor="Weak Competitive Moat",
-                severity=RiskLevel.HIGH,
-                probability=Percentage.from_decimal(0.7),
-                impact=Percentage.from_decimal(0.8),
-                description="Company lacks sustainable competitive advantages",
-                evidence=["Moat assessment: weak", f"Advantages: {company_profile.get('competitive_advantages', [])}"],
-                mitigation="Invest in IP; build network effects; increase switching costs",
-            ))
-        
-        # Market timing
-        trends = market_analysis.get("trends_analysis", {})
-        timing = trends.get("timing_assessment", "fair")
-        if timing in ["challenging", "fair"]:
-            risks.append(RiskFactor(
-                category="Market",
-                factor="Unfavorable Market Timing",
-                severity=RiskLevel.MODERATE if timing == "fair" else RiskLevel.HIGH,
-                probability=Percentage.from_decimal(0.6),
-                impact=Percentage.from_decimal(0.5),
-                description=f"Market entry timing assessed as {timing}",
-                evidence=[f"Lifecycle: {trends.get('lifecycle', 'unknown')}", f"CAGR: {trends.get('cagr', 0):.0%}"],
-                mitigation="Accelerate go-to-market; consider delaying if possible",
-            ))
-        
-        return risks
-    
-    def _analyze_operational_risks(
-        self,
-        company_profile: Dict,
-        financials: List[Dict],
-    ) -> List[RiskFactor]:
-        """Analyze operational risks."""
-        risks = []
-        
-        # Key person risk
-        key_people = company_profile.get("key_people", [])
-        if len(key_people) <= 2:
-            risks.append(RiskFactor(
-                category="Operational",
-                factor="Key Person Dependency",
-                severity=RiskLevel.MODERATE,
-                probability=Percentage.from_decimal(0.5),
-                impact=Percentage.from_decimal(0.7),
-                description=f"Only {len(key_people)} key executives identified",
-                evidence=[f"Key people: {len(key_people)}", f"Names: {key_people}"],
-                mitigation="Succession planning; key person insurance; distribute responsibilities",
-            ))
-        
-        # Employee concentration
-        employee_count = company_profile.get("employee_count") or 0
-        if employee_count < 50:
-            risks.append(RiskFactor(
-                category="Operational",
-                factor="Small Team / Scaling Risk",
-                severity=RiskLevel.MODERATE,
-                probability=Percentage.from_decimal(0.6),
-                impact=Percentage.from_decimal(0.5),
-                description=f"Only {employee_count} employees may struggle to scale post-IPO",
-                evidence=[f"Employee count: {employee_count}"],
-                mitigation="Aggressive hiring plan; outsource non-core; implement systems",
-            ))
-        
-        # Geographic concentration
-        hq = company_profile.get("headquarters", "")
-        if hq and "china" in hq.lower():
-            risks.append(RiskFactor(
-                category="Operational",
-                factor="Geopolitical / China Risk",
-                severity=RiskLevel.HIGH,
-                probability=Percentage.from_decimal(0.5),
-                impact=Percentage.from_decimal(0.9),
-                description="Headquartered in China - regulatory, delisting, audit risks",
-                evidence=[f"HQ: {hq}"],
-                mitigation="Dual listing consideration; VIE structure review; audit compliance",
-            ))
-        
-        return risks
-    
-    def _analyze_regulatory_risks(
-        self,
         legal_data: Dict,
-        company_profile: Dict,
-    ) -> List[RiskFactor]:
-        """Analyze regulatory and legal risks."""
-        risks = []
-        
-        # Pending litigation
-        litigation = legal_data.get("pending_litigation", [])
-        if litigation:
-            severity = RiskLevel.HIGH if len(litigation) > 3 else RiskLevel.MODERATE
-            risks.append(RiskFactor(
-                category="Regulatory",
-                factor="Pending Litigation",
-                severity=severity,
-                probability=Percentage.from_decimal(0.4),
-                impact=Percentage.from_decimal(0.6),
-                description=f"{len(litigation)} pending legal matters",
-                evidence=[f"Cases: {len(litigation)}", f"Details: {[l.get('description', '') for l in litigation[:3]]}"],
-                mitigation="Legal reserves; settlement planning; insurance review",
-            ))
-        
-        # Regulatory investigations
-        investigations = legal_data.get("investigations", [])
-        if investigations:
-            risks.append(RiskFactor(
-                category="Regulatory",
-                factor="Regulatory Investigation",
-                severity=RiskLevel.VERY_HIGH,
-                probability=Percentage.from_decimal(0.3),
-                impact=Percentage.from_decimal(0.9),
-                description=f"Under investigation by {len(investigations)} regulatory bodies",
-                evidence=[f"Investigations: {len(investigations)}", f"Agencies: {[i.get('agency', '') for i in investigations]}"],
-                mitigation="Cooperate fully; enhance compliance; legal defense fund",
-            ))
-        
-        # Industry-specific regulation
-        industry = company_profile.get("industry", "").lower()
-        regulated_industries = ["biotech", "pharmaceuticals", "fintech", "healthcare", "energy", "banking"]
-        if any(reg in industry for reg in regulated_industries):
-            risks.append(RiskFactor(
-                category="Regulatory",
-                factor=f"Industry Regulation - {industry.title()}",
-                severity=RiskLevel.MODERATE,
-                probability=Percentage.from_decimal(0.6),
-                impact=Percentage.from_decimal(0.5),
-                description=f"Operating in heavily regulated {industry} sector",
-                evidence=[f"Industry: {industry}"],
-                mitigation="Dedicated compliance team; regulatory strategy; lobbying",
-            ))
-        
-        return risks
-    
-    def _analyze_governance_risks(
-        self,
-        company_profile: Dict,
         ipo_details: Dict,
-    ) -> List[RiskFactor]:
-        """Analyze governance and structural risks."""
-        risks = []
+    ) -> Dict[str, Any]:
+        """Prepare verified data for risk analysis."""
         
-        # Dual class shares
-        share_structure = ipo_details.get("share_structure", {})
-        if share_structure.get("dual_class", False):
-            risks.append(RiskFactor(
-                category="Governance",
-                factor="Dual-Class Share Structure",
-                severity=RiskLevel.MODERATE,
-                probability=Percentage.from_decimal(0.8),
-                impact=Percentage.from_decimal(0.4),
-                description="Dual-class shares concentrate voting control with insiders",
-                evidence=["Dual-class structure confirmed", f"Insider voting control: {share_structure.get('insider_voting_pct', 'N/A')}%"],
-                mitigation="Sunset provision; independent board oversight; shareholder engagement",
-            ))
+        def safe_get(d: Dict, key: str, default="Not Available"):
+            return d.get(key, default)
         
-        # Insider control
-        insider_control = share_structure.get("insider_voting_pct", 0)
-        if insider_control > 50:
-            risks.append(RiskFactor(
-                category="Governance",
-                factor="Insider Control",
-                severity=RiskLevel.MODERATE if insider_control < 70 else RiskLevel.HIGH,
-                probability=Percentage.from_decimal(0.9),
-                impact=Percentage.from_decimal(0.4),
-                description=f"Insiders control {insider_control:.0f}% of voting power",
-                evidence=[f"Insider voting: {insider_control:.0f}%"],
-                mitigation="Independent directors; committee independence; shareholder proposals",
-            ))
+        latest = financials[0] if financials else {}
         
-        # Board independence
-        board = company_profile.get("board_members") or []
-        independent = [b for b in board if isinstance(b, dict) and b.get("independent", False)]
-        if len(board) > 0 and len(independent) / len(board) < 0.5:
-            risks.append(RiskFactor(
-                category="Governance",
-                factor="Insufficient Board Independence",
-                severity=RiskLevel.MODERATE,
-                probability=Percentage.from_decimal(0.7),
-                impact=Percentage.from_decimal(0.5),
-                description=f"Only {len(independent)}/{len(board)} directors are independent",
-                evidence=[f"Board size: {len(board)}", f"Independent: {len(independent)}"],
-                mitigation="Add independent directors; separate chair/CEO roles",
-            ))
-        
-        # Lockup structure
-        lockup_days = ipo_details.get("lockup_period_days", 180)
-        if lockup_days < 180:
-            risks.append(RiskFactor(
-                category="Governance",
-                factor="Short Lockup Period",
-                severity=RiskLevel.MODERATE,
-                probability=Percentage.from_decimal(0.6),
-                impact=Percentage.from_decimal(0.4),
-                description=f"Lockup only {lockup_days} days - early insider selling pressure",
-                evidence=[f"Lockup: {lockup_days} days"],
-                mitigation="Staggered lockup releases; insider selling plans (10b5-1)",
-            ))
-        
-        return risks
-    
-    def _analyze_post_ipo_risks(
-        self,
-        ipo_details: Dict,
-        company_profile: Dict,
-    ) -> List[RiskFactor]:
-        """Analyze post-IPO specific risks."""
-        risks = []
-        
-        # Lockup expiration
-        lockup_days = ipo_details.get("lockup_period_days", 180)
-        insider_shares = ipo_details.get("insider_shares_pct", 0)
-        
-        if insider_shares > 0.3:
-            risks.append(RiskFactor(
-                category="Post-IPO",
-                factor="Lockup Expiration Overhang",
-                severity=RiskLevel.HIGH if insider_shares > 0.5 else RiskLevel.MODERATE,
-                probability=Percentage.from_decimal(0.9),
-                impact=Percentage.from_decimal(0.6),
-                description=f"Insiders hold {insider_shares:.0%} - significant selling pressure at lockup expiry",
-                evidence=[f"Insider ownership: {insider_shares:.0%}", f"Lockup expiry: {lockup_days} days"],
-                mitigation="Staggered releases; 10b5-1 plans; communicate holding intentions",
-            ))
-        
-        # Small float
-        float_pct = ipo_details.get("float_pct", 0)
-        if float_pct < 0.15:
-            risks.append(RiskFactor(
-                category="Post-IPO",
-                factor="Low Public Float",
-                severity=RiskLevel.MODERATE,
-                probability=Percentage.from_decimal(0.7),
-                impact=Percentage.from_decimal(0.5),
-                description=f"Only {float_pct:.0%} float - liquidity and volatility concerns",
-                evidence=[f"Public float: {float_pct:.0%}"],
-                mitigation="Follow-on offerings; market maker engagement; buyback program",
-            ))
-        
-        # No analyst coverage expected
-        if (company_profile.get("employee_count") or 0) < 200:
-            risks.append(RiskFactor(
-                category="Post-IPO",
-                factor="Limited Analyst Coverage",
-                severity=RiskLevel.MODERATE,
-                probability=Percentage.from_decimal(0.8),
-                impact=Percentage.from_decimal(0.4),
-                description="Small size may limit initial analyst coverage",
-                evidence=[f"Employees: {company_profile.get('employee_count', 0)}"],
-                mitigation="IR program; investor conferences; targeted outreach",
-            ))
-        
-        return risks
-    
-    def _rank_risks(self, risks: List[RiskFactor]) -> List[RiskFactor]:
-        """Rank risks by risk score."""
-        return sorted(risks, key=lambda r: r.risk_score, reverse=True)
-    
-    def _determine_overall_risk(self, risks: List[RiskFactor]) -> RiskLevel:
-        """Determine overall risk level."""
-        if not risks:
-            return RiskLevel.LOW
-        
-        # Weight by severity
-        severity_weights = {
-            RiskLevel.EXTREME: 100,
-            RiskLevel.VERY_HIGH: 80,
-            RiskLevel.HIGH: 60,
-            RiskLevel.MODERATE: 40,
-            RiskLevel.LOW: 20,
-            RiskLevel.VERY_LOW: 10,
-        }
-        
-        total_weight = sum(severity_weights.get(r.severity, 40) for r in risks[:10])
-        avg_weight = total_weight / min(10, len(risks))
-        
-        if avg_weight >= 80:
-            return RiskLevel.EXTREME
-        elif avg_weight >= 60:
-            return RiskLevel.VERY_HIGH
-        elif avg_weight >= 45:
-            return RiskLevel.HIGH
-        elif avg_weight >= 30:
-            return RiskLevel.MODERATE
-        elif avg_weight >= 15:
-            return RiskLevel.LOW
-        else:
-            return RiskLevel.VERY_LOW
-    
-    def _calculate_overall_score(self, risks: List[RiskFactor]) -> float:
-        """Calculate overall risk score (0-100)."""
-        if not risks:
-            return 10.0
-        
-        # Average of top 10 risk scores
-        top_risks = risks[:10]
-        return sum(r.risk_score for r in top_risks) / len(top_risks)
-    
-    def _group_by_category(self, risks: List[RiskFactor]) -> Dict[str, List[Dict]]:
-        """Group risks by category."""
-        from collections import defaultdict
-        grouped = defaultdict(list)
-        for r in risks:
-            grouped[r.category].append(r.to_dict())
-        return dict(grouped)
-    
-    def _generate_scenarios(
-        self,
-        risks: List[RiskFactor],
-        financials: Dict,
-    ) -> Dict[str, Dict]:
-        """Generate base/bear/bull scenarios."""
-        base_revenue = financials.get("revenue", 1)
-        base_fcf = financials.get("free_cash_flow", 0)
-        
-        # Calculate risk-adjusted impacts
-        high_impact_risks = [r for r in risks if r.impact.to_decimal() > 0.7]
-        total_prob_impact = sum(r.probability.to_decimal() * r.impact.to_decimal() for r in high_impact_risks)
-        
-        bear_impact = min(0.5, total_prob_impact)
-        bull_impact = -total_prob_impact * 0.3  # Some risks may not materialize
-        
-        return {
-            "base": {
-                "revenue": base_revenue,
-                "fcf": base_fcf,
-                "probability": 0.5,
+        summary = {
+            "financials": {
+                "revenue": latest.get("revenue"),
+                "revenue_growth_yoy": latest.get("revenue_growth_yoy"),
+                "gross_margin": latest.get("gross_margin"),
+                "operating_margin": latest.get("operating_margin"),
+                "net_income": latest.get("net_income"),
+                "ebitda": latest.get("ebitda"),
+                "free_cash_flow": latest.get("free_cash_flow"),
+                "cash_and_equivalents": latest.get("cash_and_equivalents"),
+                "total_debt": latest.get("total_debt"),
+                "total_equity": latest.get("total_equity"),
+                "debt_to_equity": latest.get("debt_to_equity"),
+                "current_ratio": latest.get("current_ratio"),
+                "quick_ratio": latest.get("quick_ratio"),
+                "interest_coverage": latest.get("interest_coverage"),
+                "historical_periods": len(financials),
+                "revenue_history": [
+                    {"period": f.get("period"), "revenue": f.get("revenue"), 
+                     "growth": f.get("revenue_growth_yoy")}
+                    for f in financials[:4]
+                ],
             },
-            "bear": {
-                "revenue": base_revenue * (1 - bear_impact),
-                "fcf": base_fcf * (1 - bear_impact * 1.5),
-                "probability": 0.25,
-                "key_risks": [r.factor for r in high_impact_risks[:5]],
+            "company_profile": {
+                "key_people": company_profile.get("key_people", []),
+                "employee_count": company_profile.get("employee_count"),
+                "headquarters": company_profile.get("headquarters"),
+                "board_members": company_profile.get("board_members", []),
+                "competitive_advantages": company_profile.get("competitive_advantages", []),
             },
-            "bull": {
-                "revenue": base_revenue * (1 + abs(bull_impact)),
-                "fcf": base_fcf * (1 + abs(bull_impact)),
-                "probability": 0.25,
-                "assumptions": "Risks mitigated; execution exceeds expectations",
+            "market_analysis": {
+                "tam_score": market_analysis.get("tam_analysis", {}).get("score"),
+                "competitive_intensity": market_analysis.get("competitive_analysis", {}).get("intensity"),
+                "moat_strength": market_analysis.get("competitive_analysis", {}).get("moat_strength"),
+                "total_competitors": market_analysis.get("competitive_analysis", {}).get("total_competitors"),
+                "direct_competitors": market_analysis.get("competitive_analysis", {}).get("direct_competitors"),
+                "timing_assessment": market_analysis.get("trends_analysis", {}).get("timing_assessment"),
+                "lifecycle": market_analysis.get("trends_analysis", {}).get("lifecycle"),
+                "cagr": market_analysis.get("trends_analysis", {}).get("cagr"),
+                "tailwinds": market_analysis.get("trends_analysis", {}).get("tailwinds", []),
+                "headwinds": market_analysis.get("trends_analysis", {}).get("headwinds", []),
+            },
+            "competitive_analysis": competitive_analysis,
+            "legal_data": {
+                "pending_litigation": legal_data.get("pending_litigation", []),
+                "investigations": legal_data.get("investigations", []),
+            },
+            "ipo_details": {
+                "share_structure": ipo_details.get("share_structure", {}),
+                "lockup_period_days": ipo_details.get("lockup_period_days"),
+                "insider_shares_pct": ipo_details.get("insider_shares_pct"),
+                "float_pct": ipo_details.get("float_pct"),
             },
         }
-    
-    def _identify_red_flags(self, risks: List[RiskFactor]) -> List[str]:
-        """Identify critical red flags."""
-        red_flags = []
-        
-        for risk in risks[:10]:
-            if risk.severity in [RiskLevel.EXTREME, RiskLevel.VERY_HIGH]:
-                if risk.probability.to_decimal() > 0.7 and risk.impact.to_decimal() > 0.7:
-                    red_flags.append(
-                        f"🚨 {risk.category}: {risk.factor} "
-                        f"(Prob: {risk.probability.to_percent():.0f}%, Impact: {risk.impact.to_percent():.0f}%)"
-                    )
-        
-        # Specific patterns
-        financial_risks = [r for r in risks if r.category == "Financial"]
-        high_financial = [r for r in financial_risks if r.severity in [RiskLevel.HIGH, RiskLevel.VERY_HIGH, RiskLevel.EXTREME]]
-        if len(high_financial) >= 3:
-            red_flags.append("🚨 Multiple high-severity financial risks detected")
-        
-        regulatory_risks = [r for r in risks if r.category == "Regulatory"]
-        if any(r.severity == RiskLevel.VERY_HIGH for r in regulatory_risks):
-            red_flags.append("🚨 Critical regulatory risk - potential existential threat")
-        
-        return red_flags
-    
-    def _summarize_mitigations(self, risks: List[RiskFactor]) -> Dict[str, List[str]]:
-        """Summarize key mitigations by category."""
-        from collections import defaultdict
-        mitigations = defaultdict(list)
-        
-        for risk in risks[:15]:  # Top 15
-            if risk.mitigation:
-                mitigations[risk.category].append(risk.mitigation)
-        
-        return {k: list(set(v)) for k, v in mitigations.items()}
-    
-    def _calculate_confidence(
-        self,
-        financials: List[Dict],
-        company_profile: Dict,
-        legal_data: Dict,
-    ) -> float:
-        """Calculate confidence in risk assessment."""
-        confidence = 0.5
-        
-        if len(financials) >= 3:
-            confidence += 0.15
-        elif len(financials) > 0:
-            confidence += 0.1
-        
-        if company_profile.get("key_people"):
-            confidence += 0.05
-        
-        if legal_data.get("pending_litigation") is not None:
-            confidence += 0.1
-        
-        if company_profile.get("board_members"):
-            confidence += 0.05
-        
-        if company_profile.get("competitive_advantages"):
-            confidence += 0.05
-        
-        return min(1.0, confidence)
-    
-    def _generate_reasoning(self, result: Dict) -> str:
-        """Generate reasoning summary."""
-        parts = [
-            f"Overall Risk Level: {result['overall_risk_level'].upper()}",
-            f"Risk Score: {result['overall_risk_score']:.1f}/100",
-            f"Total Risks Identified: {result['risk_count']}",
-            f"High Priority: {result['high_priority_risks']}",
-            "",
-            "Top 5 Risks:",
-        ]
-        
-        for i, risk in enumerate(result["top_risks"][:5], 1):
-            parts.append(
-                f"  {i}. [{risk['severity']}] {risk['category']}: {risk['factor']} "
-                f"(Score: {risk['risk_score']:.1f})"
-            )
-        
-        if result["red_flags"]:
-            parts.append("\n🚨 RED FLAGS:")
-            for flag in result["red_flags"]:
-                parts.append(f"  {flag}")
-        
-        return "\n".join(parts)
-    
-    def _collect_evidence(self, risks: List[RiskFactor]) -> List[str]:
-        """Collect evidence from top risks."""
+        return summary
+
+    def _create_analysis_prompt(self, summary: Dict) -> str:
+        """Create the analysis prompt for the LLM."""
+        prompt = f"""Analyze the risks for the following IPO candidate using ONLY the verified data provided below.
+
+FINANCIAL DATA:
+- Revenue: {summary['financials'].get('revenue', 'Not Available')}
+- Revenue Growth YoY: {summary['financials'].get('revenue_growth_yoy', 'Not Available')}
+- Gross Margin: {summary['financials'].get('gross_margin', 'Not Available')}
+- Operating Margin: {summary['financials'].get('operating_margin', 'Not Available')}
+- Net Income: {summary['financials'].get('net_income', 'Not Available')}
+- EBITDA: {summary['financials'].get('ebitda', 'Not Available')}
+- Free Cash Flow: {summary['financials'].get('free_cash_flow', 'Not Available')}
+- Cash & Equivalents: {summary['financials'].get('cash_and_equivalents', 'Not Available')}
+- Total Debt: {summary['financials'].get('total_debt', 'Not Available')}
+- Total Equity: {summary['financials'].get('total_equity', 'Not Available')}
+- Debt/Equity: {summary['financials'].get('debt_to_equity', 'Not Available')}
+- Current Ratio: {summary['financials'].get('current_ratio', 'Not Available')}
+- Quick Ratio: {summary['financials'].get('quick_ratio', 'Not Available')}
+- Interest Coverage: {summary['financials'].get('interest_coverage', 'Not Available')}
+- Historical Periods: {summary['financials'].get('historical_periods', 0)}
+
+COMPANY PROFILE:
+- Key People: {len(summary['company_profile'].get('key_people', []))} identified
+- Employee Count: {summary['company_profile'].get('employee_count', 'Not Available')}
+- Headquarters: {summary['company_profile'].get('headquarters', 'Not Available')}
+- Board Members: {len(summary['company_profile'].get('board_members', []))} identified
+- Competitive Advantages: {summary['company_profile'].get('competitive_advantages', [])}
+
+MARKET ANALYSIS:
+- TAM Score: {summary['market_analysis'].get('tam_score', 'Not Available')}
+- Competitive Intensity: {summary['market_analysis'].get('competitive_intensity', 'Not Available')}
+- Moat Strength: {summary['market_analysis'].get('moat_strength', 'Not Available')}
+- Total Competitors: {summary['market_analysis'].get('total_comparators', 'Not Available')}
+- Direct Competitors: {summary['market_analysis'].get('direct_competitors', 'Not Available')}
+- Timing Assessment: {summary['market_analysis'].get('timing_assessment', 'Not Available')}
+- Lifecycle: {summary['market_analysis'].get('lifecycle', 'Not Available')}
+- CAGR: {summary['market_analysis'].get('cagr', 'Not Available')}
+- Tailwinds: {summary['market_analysis'].get('tailwinds', [])}
+- Headwinds: {summary['market_analysis'].get('headwinds', [])}
+
+LEGAL DATA:
+- Pending Litigation: {len(summary['legal_data'].get('pending_litigation', []))} matters
+- Investigations: {len(summary['legal_data'].get('investigations', []))} matters
+
+IPO DETAILS:
+- Share Structure: {summary['ipo_details'].get('share_structure', {})}
+- Lockup Period: {summary['ipo_details'].get('lockup_period_days', 'Not Available')} days
+- Insider Shares: {summary['ipo_details'].get('insider_shares_pct', 'Not Available')}
+- Float %: {summary['ipo_details'].get('float_pct', 'Not Available')}
+
+REMEMBER: Use ONLY the data above. If a value says "Not Available", do not guess or infer it. Return null for unavailable data. Distinguish clearly between VERIFIED FACTS (from data above) and YOUR ANALYSIS/INTERPRETATION."""
+        return prompt
+
+    def _extract_json(self, content: str) -> Dict:
+        start = content.find('{')
+        end = content.rfind('}') + 1
+        if start >= 0 and end > start:
+            try:
+                return json.loads(content[start:end])
+            except json.JSONDecodeError:
+                pass
+        raise ValueError("Could not extract valid JSON from response")
+
+    def _collect_evidence(self, summary: Dict) -> List[str]:
         evidence = []
-        for risk in risks[:10]:
-            evidence.extend(risk.evidence[:2])
-        return evidence[:20]
+        fin = summary.get('financials', {})
+        if fin.get('revenue') is not None:
+            evidence.append(f"Revenue: {fin['revenue']}")
+        if fin.get('revenue_growth_yoy') is not None:
+            evidence.append(f"YoY Growth: {fin['revenue_growth_yoy']:.1%}")
+        if fin.get('gross_margin') is not None:
+            evidence.append(f"Gross Margin: {fin['gross_margin']:.1%}")
+        if fin.get('free_cash_flow') is not None:
+            evidence.append(f"FCF: {fin['free_cash_flow']}")
+        if fin.get('cash_and_equivalents') is not None:
+            evidence.append(f"Cash: {fin['cash_and_equivalents']}")
+        if fin.get('total_debt') is not None:
+            evidence.append(f"Total Debt: {fin['total_debt']}")
+        evidence.append(f"Periods analyzed: {fin.get('historical_periods', 0)}")
+        return evidence

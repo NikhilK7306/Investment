@@ -68,7 +68,7 @@ services:
         condition: service_healthy
     networks:
       - ipo-network
-    command: sh -c "PYTHONPATH=/app DATABASE_URL=postgresql+psycopg2://postgres:postgres@postgres:5432/ipo_intelligence alembic upgrade head && PYTHONPATH=/app uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload"
+    command: sh -c "PYTHONPATH=/app DATABASE_URL=postgresql+psycopg2://postgres:postgres@postgres:5432/ipo_intelligence alembic upgrade head && PYTHONPATH=/app uvicorn app.main:app --host 0.0.0.0 --port 8000"
 
   # Celery Worker
   celery-worker:

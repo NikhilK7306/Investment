@@ -147,6 +147,18 @@ class Settings(BaseSettings):
     yfinance_enabled: bool = True
     openbb_enabled: bool = True
 
+    # News/Sentiment APIs
+    newsapi_key: str = ""
+    fmp_api_key: str = ""
+    reddit_client_id: str = ""
+    reddit_client_secret: str = ""
+    twitter_bearer_token: str = ""
+
+    # Indian IPO Sources
+    nse_api_key: str = ""
+    bse_api_key: str = ""
+    sebi_api_access: str = ""
+
     # Analysis Settings
     default_analysis_depth: str = "standard"  # standard, deep, comprehensive
     max_concurrent_analyses: int = 10
@@ -180,6 +192,16 @@ class Settings(BaseSettings):
     otlp_endpoint: str = "http://localhost:4317"
     otlp_insecure: bool = True
     prometheus_port: int = 9090
+
+    # LLM Configuration
+    default_llm_provider: str = "openai"  # openai, anthropic, google
+    openai_default_model: str = "gpt-4o"
+    anthropic_default_model: str = "claude-3-5-sonnet-20241022"
+    google_ai_default_model: str = "gemini-1.5-pro"
+    llm_temperature: float = 0.1
+    llm_max_tokens: int = 4000
+    llm_request_timeout: int = 60
+    llm_max_retries: int = 3
 
     # Features
     enable_discovery_agent: bool = True

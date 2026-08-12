@@ -1,28 +1,117 @@
-"""Fundamental Analysis Agent - Analyzes company financial health."""
+"""Fundamental Analysis Agent - Analyzes company financial health using LLM."""
 
+import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
 from uuid import UUID
+
+from pydantic import BaseModel, Field
 
 from app.agents.base import BaseAgent, AgentContext, AgentResult
 from app.domain.enums.enums import AgentName, AgentStatus
 from app.domain.value_objects.value_objects import FinancialMetrics, ScoreComponent
 from app.domain.value_objects.value_objects import Money, Percentage, Ratio
 from app.core.exceptions.base import AgentError
+from app.infrastructure.ai_models import LLMProviderFactory, LLMConfig, LLMProviderType
+
+
+class RevenueAnalysis(BaseModel):
+    """Revenue quality and growth analysis."""
+    score: int = Field(ge=0, le=100)
+    yoy_growth: Optional[float] = None
+    cagr_3y: Optional[float] = None
+    gross_margin: Optional[float] = None
+    revenue_concentration: Optional[str] = None
+    details: List[str] = []
+    metrics: Dict[str, Any] = {}
+
+
+class ProfitabilityAnalysis(BaseModel):
+    """Profitability analysis."""
+    score: int = Field(ge=0, le=100)
+    operating_margin: Optional[float] = None
+    net_margin: Optional[float] = None
+    ebitda_margin: Optional[float] = None
+    roe: Optional[float] = None
+    roic: Optional[float] = None
+    details: List[str] = []
+    metrics: Dict[str, Any] = {}
+
+
+class BalanceSheetAnalysis(BaseModel):
+    """Balance sheet strength analysis."""
+    score: int = Field(ge=0, le=100)
+    cash_position: Optional[float] = None
+    debt_to_equity: Optional[float] = None
+    current_ratio: Optional[float] = None
+    quick_ratio: Optional[float] = None
+    details: List[str] = []
+    metrics: Dict[str, Any] = {}
+
+
+class CashFlowAnalysis(BaseModel):
+    """Cash flow quality analysis."""
+    score: int = Field(ge=0, le=100)
+    operating_cash_flow: Optional[float] = None
+    free_cash_flow: Optional[float] = None
+    fcf_margin: Optional[float] = None
+    fcf_conversion: Optional[float] = None
+    details: List[str] = []
+    metrics: Dict[str, Any] = {}
+
+
+class ValuationAnalysis(BaseModel):
+    """Valuation analysis."""
+    score: int = Field(ge=0, le=100)
+    ev_revenue: Optional[float] = None
+    ev_ebitda: Optional[float] = None
+    pe_ratio: Optional[float] = None
+    peg_ratio: Optional[float] = None
+    vs_peers: Optional[str] = None
+    details: List[str] = []
+    metrics: Dict[str, Any] = {}
+
+
+class GrowthAnalysis(BaseModel):
+    """Growth sustainability analysis."""
+    score: int = Field(ge=0, le=100)
+    tam_usd: Optional[float] = None
+    competitive_advantages: List[str] = []
+    details: List[str] = []
+    metrics: Dict[str, Any] = {}
+
+
+class FundamentalAnalysisOutput(BaseModel):
+    """Structured output for fundamental analysis."""
+    overall_score: int = Field(ge=0, le=100)
+    confidence: float = Field(ge=0, le=1)
+    revenue_analysis: RevenueAnalysis
+    profitability_analysis: ProfitabilityAnalysis
+    balance_sheet_analysis: BalanceSheetAnalysis
+    cash_flow_analysis: CashFlowAnalysis
+    valuation_analysis: ValuationAnalysis
+    growth_analysis: GrowthAnalysis
+    key_metrics: Dict[str, Any]
+    strengths: List[str]
+    weaknesses: List[str]
+    red_flags: List[str]
+    public_comps: List[Dict[str, Any]] = []
+    reasoning: str
 
 
 class FundamentalAnalysisAgent(BaseAgent[Dict[str, Any], Dict[str, Any]]):
-    """Agent that performs fundamental financial analysis."""
-    
+    """Agent that performs fundamental financial analysis using LLM."""
+
     def __init__(self):
         super().__init__(
             name=AgentName.FUNDAMENTAL,
-            description="Analyzes company financial health, profitability, and growth",
-            version="1.0.0",
+            description="Analyzes company financial health, profitability, and growth using LLM",
+            version="2.0.0",
             max_retries=2,
             timeout_seconds=180,
         )
-    
+        self._llm_provider = None
+
     @property
     def system_prompt(self) -> str:
         return """You are a senior equity research analyst specializing in fundamental analysis of pre-IPO companies.
@@ -76,8 +165,8 @@ Provide a structured analysis with:
 - Red flags or concerns
 - Comparison to relevant public comps
 
-Be rigorous, quantitative, and cite specific numbers. Highlight both positives and negatives."""
-    
+CRITICAL: Use ONLY the supplied verified data. If information is unavailable, return null/Not Available. Do NOT infer or fabricate factual values. Distinguish clearly between verified facts and your analytical interpretation."""
+
     @property
     def available_tools(self) -> List[str]:
         return [
@@ -90,92 +179,83 @@ Be rigorous, quantitative, and cite specific numbers. Highlight both positives a
             "analyze_cash_flows",
             "compute_valuation_multiples",
         ]
-    
+
+    def _get_llm_provider(self):
+        """Get or create LLM provider."""
+        if self._llm_provider is None:
+            self._llm_provider = LLMProviderFactory.create_from_env()
+        return self._llm_provider
+
     async def execute(
         self,
         context: AgentContext,
         input_data: Dict[str, Any],
     ) -> AgentResult[Dict[str, Any]]:
-        """Execute fundamental analysis."""
+        """Execute fundamental analysis using LLM."""
         start_time = datetime.utcnow()
-        
+
         try:
             # Extract input data
             financials = input_data.get("financials", [])
             company_profile = input_data.get("company_profile", {})
             public_comps = input_data.get("public_comps", [])
-            
+
             if not financials:
                 return AgentResult(
                     agent_name=self.name,
-                    status=AgentStatus.FAILED,
-                    error="No financial data provided",
-                    error_type="MISSING_DATA",
+                    status=AgentStatus.INSUFFICIENT_DATA,
+                    error="No verified financial data provided",
+                    error_type="INSUFFICIENT_DATA",
+                    data={"data_quality": "none", "reason": "No financial statements available"},
                 )
-            
-            # Parse financial metrics
+
+            # Prepare data for LLM
             latest = financials[0] if financials else {}
-            metrics = self._parse_financial_metrics(latest)
-            
-            # Perform analysis pillars
-            revenue_analysis = self._analyze_revenue(financials, metrics)
-            profitability_analysis = self._analyze_profitability(metrics)
-            balance_sheet_analysis = self._analyze_balance_sheet(metrics)
-            cash_flow_analysis = self._analyze_cash_flow(metrics)
-            valuation_analysis = self._analyze_valuation(metrics, public_comps)
-            growth_analysis = self._analyze_growth_sustainability(
-                financials, company_profile, metrics
+            financial_summary = self._prepare_financial_summary(latest, financials, company_profile, public_comps)
+
+            # Get LLM provider
+            provider = self._get_llm_provider()
+            await provider.initialize()
+
+            # Create prompt for LLM
+            prompt = self._create_analysis_prompt(financial_summary)
+
+            # Call LLM with structured output
+            response = await provider.complete(
+                prompt=prompt,
+                system_prompt=self.system_prompt,
+                temperature=0.1,
+                max_tokens=4000,
+                response_model=FundamentalAnalysisOutput,
             )
-            
-            # Calculate scores
-            scores = self._calculate_scores(
-                revenue_analysis,
-                profitability_analysis,
-                balance_sheet_analysis,
-                cash_flow_analysis,
-                valuation_analysis,
-                growth_analysis,
-            )
-            
-            overall_score = sum(scores.values()) / len(scores)
-            confidence = self._calculate_confidence(financials, metrics)
-            
-            # Build result
-            result_data = {
-                "overall_score": round(overall_score, 1),
-                "confidence": confidence,
-                "pillar_scores": scores,
-                "revenue_analysis": revenue_analysis,
-                "profitability_analysis": profitability_analysis,
-                "balance_sheet_analysis": balance_sheet_analysis,
-                "cash_flow_analysis": cash_flow_analysis,
-                "valuation_analysis": valuation_analysis,
-                "growth_analysis": growth_analysis,
-                "key_metrics": self._extract_key_metrics(metrics),
-                "strengths": self._identify_strengths(
-                    revenue_analysis, profitability_analysis,
-                    balance_sheet_analysis, cash_flow_analysis, growth_analysis
-                ),
-                "weaknesses": self._identify_weaknesses(
-                    revenue_analysis, profitability_analysis,
-                    balance_sheet_analysis, cash_flow_analysis, growth_analysis
-                ),
-                "red_flags": self._identify_red_flags(metrics, financials),
-                "public_comps": public_comps[:5] if public_comps else [],
-            }
-            
+
+            # Parse response
+            if isinstance(response.content, str):
+                try:
+                    analysis_data = json.loads(response.content)
+                except json.JSONDecodeError:
+                    # Try to extract JSON from content
+                    analysis_data = self._extract_json(response.content)
+            else:
+                analysis_data = response.content
+
+            # Validate and ensure required fields
+            analysis = FundamentalAnalysisOutput(**analysis_data)
+
             duration = (datetime.utcnow() - start_time).total_seconds() * 1000
-            
+
             return AgentResult(
                 agent_name=self.name,
                 status=AgentStatus.COMPLETED,
-                data=result_data,
-                confidence=confidence,
-                reasoning=self._generate_reasoning(result_data),
-                evidence=self._collect_evidence(metrics, financials),
+                data=analysis.model_dump(),
+                confidence=analysis.confidence,
+                reasoning=analysis.reasoning,
+                evidence=self._collect_evidence(financial_summary),
                 duration_ms=duration,
+                tokens_used=response.tokens_used,
+                cost_usd=response.cost_usd,
             )
-            
+
         except Exception as e:
             duration = (datetime.utcnow() - start_time).total_seconds() * 1000
             return AgentResult(
@@ -185,502 +265,172 @@ Be rigorous, quantitative, and cite specific numbers. Highlight both positives a
                 error_type=type(e).__name__,
                 duration_ms=duration,
             )
-    
-    def _parse_financial_metrics(self, data: Dict[str, Any]) -> FinancialMetrics:
-        """Parse raw financial data into metrics object."""
-        def money(val, curr="USD"):
-            if val is None:
-                return None
-            return Money(val, curr)
-        
-        def pct(val):
-            if val is None:
-                return None
-            return Percentage.from_decimal(val)
-        
-        def ratio(val, name, desc=""):
-            if val is None:
-                return None
-            return Ratio(val, name, desc)
-        
-        return FinancialMetrics(
-            revenue=money(data.get("revenue")),
-            revenue_growth_yoy=pct(data.get("revenue_growth_yoy")),
-            revenue_growth_qoq=pct(data.get("revenue_growth_qoq")),
-            gross_profit=money(data.get("gross_profit")),
-            gross_margin=pct(data.get("gross_margin")),
-            operating_income=money(data.get("operating_income")),
-            operating_margin=pct(data.get("operating_margin")),
-            net_income=money(data.get("net_income")),
-            net_margin=pct(data.get("net_margin")),
-            ebitda=money(data.get("ebitda")),
-            ebitda_margin=pct(data.get("ebitda_margin")),
-            free_cash_flow=money(data.get("free_cash_flow")),
-            fcf_margin=pct(data.get("fcf_margin")),
-            total_assets=money(data.get("total_assets")),
-            total_liabilities=money(data.get("total_liabilities")),
-            total_equity=money(data.get("total_equity")),
-            cash_and_equivalents=money(data.get("cash_and_equivalents")),
-            total_debt=money(data.get("total_debt")),
-            operating_cash_flow=money(data.get("operating_cash_flow")),
-            debt_to_equity=ratio(data.get("debt_to_equity"), "Debt/Equity"),
-            current_ratio=ratio(data.get("current_ratio"), "Current Ratio"),
-            quick_ratio=ratio(data.get("quick_ratio"), "Quick Ratio"),
-            roe=pct(data.get("roe")),
-            roa=pct(data.get("roa")),
-            roic=pct(data.get("roic")),
-            pe_ratio=ratio(data.get("pe_ratio"), "P/E"),
-            ps_ratio=ratio(data.get("ps_ratio"), "P/S"),
-            ev_ebitda=ratio(data.get("ev_ebitda"), "EV/EBITDA"),
-            ev_revenue=ratio(data.get("ev_revenue"), "EV/Revenue"),
-            revenue_cagr_3y=pct(data.get("revenue_cagr_3y")),
-            revenue_cagr_5y=pct(data.get("revenue_cagr_5y")),
-            fcf_conversion=pct(data.get("fcf_conversion")),
-        )
-    
-    def _analyze_revenue(
+
+    def _prepare_financial_summary(
         self,
-        financials: List[Dict],
-        metrics: FinancialMetrics,
-    ) -> Dict[str, Any]:
-        """Analyze revenue quality and growth."""
-        analysis = {
-            "score": 0,
-            "details": [],
-            "metrics": {},
-        }
-        
-        score = 50  # Base
-        
-        # Growth
-        if metrics.revenue_growth_yoy:
-            growth = metrics.revenue_growth_yoy.to_decimal()
-            analysis["metrics"]["yoy_growth"] = growth
-            if growth > 0.5:
-                score += 20
-                analysis["details"].append(f"Exceptional YoY growth: {growth:.1%}")
-            elif growth > 0.3:
-                score += 15
-                analysis["details"].append(f"Strong YoY growth: {growth:.1%}")
-            elif growth > 0.15:
-                score += 10
-                analysis["details"].append(f"Healthy YoY growth: {growth:.1%}")
-            elif growth > 0:
-                score += 5
-            else:
-                score -= 10
-                analysis["details"].append(f"Declining revenue: {growth:.1%}")
-        
-        # CAGR
-        if metrics.revenue_cagr_3y:
-            cagr = metrics.revenue_cagr_3y.to_decimal()
-            analysis["metrics"]["cagr_3y"] = cagr
-            if cagr > 0.4:
-                score += 10
-            elif cagr > 0.25:
-                score += 5
-        
-        # Gross margin
-        if metrics.gross_margin:
-            gm = metrics.gross_margin.to_decimal()
-            analysis["metrics"]["gross_margin"] = gm
-            if gm > 0.75:
-                score += 10
-                analysis["details"].append(f"Excellent gross margin: {gm:.1%}")
-            elif gm > 0.5:
-                score += 5
-            elif gm < 0.3:
-                score -= 10
-                analysis["details"].append(f"Low gross margin: {gm:.1%}")
-        
-        # Revenue concentration (would need segment data)
-        analysis["details"].append("Revenue concentration analysis requires segment data")
-        
-        analysis["score"] = max(0, min(100, score))
-        return analysis
-    
-    def _analyze_profitability(self, metrics: FinancialMetrics) -> Dict[str, Any]:
-        """Analyze profitability metrics."""
-        analysis = {"score": 0, "details": [], "metrics": {}}
-        score = 50
-        
-        # Operating margin
-        if metrics.operating_margin:
-            om = metrics.operating_margin.to_decimal()
-            analysis["metrics"]["operating_margin"] = om
-            if om > 0.2:
-                score += 20
-                analysis["details"].append(f"Strong operating margin: {om:.1%}")
-            elif om > 0.1:
-                score += 10
-            elif om > 0:
-                score += 5
-            else:
-                score -= 10
-                analysis["details"].append(f"Negative operating margin: {om:.1%}")
-        
-        # Net margin
-        if metrics.net_margin:
-            nm = metrics.net_margin.to_decimal()
-            analysis["metrics"]["net_margin"] = nm
-        
-        # EBITDA margin
-        if metrics.ebitda_margin:
-            ebitda_m = metrics.ebitda_margin.to_decimal()
-            analysis["metrics"]["ebitda_margin"] = ebitda_m
-            if ebitda_m > 0.3:
-                score += 10
-        
-        # ROE/ROIC
-        if metrics.roe:
-            roe = metrics.roe.to_decimal()
-            analysis["metrics"]["roe"] = roe
-            if roe > 0.2:
-                score += 10
-        
-        if metrics.roic:
-            roic = metrics.roic.to_decimal()
-            analysis["metrics"]["roic"] = roic
-            if roic > 0.15:
-                score += 10
-        
-        analysis["score"] = max(0, min(100, score))
-        return analysis
-    
-    def _analyze_balance_sheet(self, metrics: FinancialMetrics) -> Dict[str, Any]:
-        """Analyze balance sheet strength."""
-        analysis = {"score": 0, "details": [], "metrics": {}}
-        score = 50
-        
-        # Cash position
-        if metrics.cash_and_equivalents:
-            cash = metrics.cash_and_equivalents.amount
-            analysis["metrics"]["cash"] = float(cash)
-            if cash > 100_000_000:
-                score += 15
-            elif cash > 50_000_000:
-                score += 10
-            elif cash > 10_000_000:
-                score += 5
-        
-        # Debt levels
-        if metrics.total_debt and metrics.total_equity:
-            debt = metrics.total_debt.amount
-            equity = metrics.total_equity.amount
-            if equity > 0:
-                d_e = debt / equity
-                analysis["metrics"]["debt_to_equity"] = d_e
-                if d_e < 0.3:
-                    score += 15
-                elif d_e < 0.5:
-                    score += 10
-                elif d_e < 1:
-                    score += 5
-                elif d_e > 2:
-                    score -= 15
-                    analysis["details"].append(f"High leverage: D/E = {d_e:.2f}")
-        
-        # Current ratio
-        if metrics.current_ratio:
-            cr = metrics.current_ratio.value
-            analysis["metrics"]["current_ratio"] = cr
-            if cr > 2:
-                score += 10
-            elif cr > 1.5:
-                score += 5
-            elif cr < 1:
-                score -= 10
-        
-        # Interest coverage
-        if metrics.ebitda and metrics.total_debt:
-            # Simplified - would need interest expense
-            pass
-        
-        analysis["score"] = max(0, min(100, score))
-        return analysis
-    
-    def _analyze_cash_flow(self, metrics: FinancialMetrics) -> Dict[str, Any]:
-        """Analyze cash flow quality."""
-        analysis = {"score": 0, "details": [], "metrics": {}}
-        score = 50
-        
-        # Operating cash flow
-        if metrics.operating_cash_flow:
-            ocf = metrics.operating_cash_flow.amount
-            analysis["metrics"]["operating_cash_flow"] = float(ocf)
-            if ocf > 0:
-                score += 15
-            else:
-                score -= 20
-        
-        # Free cash flow
-        if metrics.free_cash_flow:
-            fcf = metrics.free_cash_flow.amount
-            analysis["metrics"]["free_cash_flow"] = float(fcf)
-            if fcf > 0:
-                score += 20
-                analysis["details"].append(f"Positive FCF: ${fcf:,.0f}")
-            else:
-                score -= 10
-        
-        # FCF margin
-        if metrics.fcf_margin:
-            fcf_m = metrics.fcf_margin.to_decimal()
-            analysis["metrics"]["fcf_margin"] = fcf_m
-            if fcf_m > 0.2:
-                score += 10
-            elif fcf_m > 0.1:
-                score += 5
-        
-        # FCF conversion
-        if metrics.fcf_conversion:
-            fcf_conv = metrics.fcf_conversion.to_decimal()
-            analysis["metrics"]["fcf_conversion"] = fcf_conv
-            if fcf_conv > 1:
-                score += 10
-        
-        analysis["score"] = max(0, min(100, score))
-        return analysis
-    
-    def _analyze_valuation(
-        self,
-        metrics: FinancialMetrics,
-        public_comps: List[Dict],
-    ) -> Dict[str, Any]:
-        """Analyze valuation relative to peers."""
-        analysis = {"score": 0, "details": [], "metrics": {}}
-        score = 50
-        
-        if not public_comps:
-            analysis["details"].append("No public comps available for valuation comparison")
-            return analysis
-        
-        # Compare EV/Revenue
-        if metrics.ev_revenue and metrics.revenue:
-            ev_rev = metrics.ev_revenue.value
-            analysis["metrics"]["ev_revenue"] = ev_rev
-            
-            comp_ev_revs = [c.get("ev_revenue") for c in public_comps if c.get("ev_revenue")]
-            if comp_ev_revs:
-                median_comp = sorted(comp_ev_revs)[len(comp_ev_revs) // 2]
-                analysis["metrics"]["median_comp_ev_revenue"] = median_comp
-                
-                if ev_rev < median_comp * 0.8:
-                    score += 15
-                    analysis["details"].append(f"Trading at discount to peers: {ev_rev:.1f}x vs {median_comp:.1f}x")
-                elif ev_rev > median_comp * 1.5:
-                    score -= 15
-                    analysis["details"].append(f"Trading at premium to peers: {ev_rev:.1f}x vs {median_comp:.1f}x")
-        
-        analysis["score"] = max(0, min(100, score))
-        return analysis
-    
-    def _analyze_growth_sustainability(
-        self,
+        latest: Dict,
         financials: List[Dict],
         company_profile: Dict,
-        metrics: FinancialMetrics,
+        public_comps: List[Dict],
     ) -> Dict[str, Any]:
-        """Analyze sustainability of growth."""
-        analysis = {"score": 0, "details": [], "metrics": {}}
-        score = 50
+        """Prepare verified financial data for LLM analysis."""
         
-        # Market size indicators
-        tam = company_profile.get("tam")
-        if tam:
-            analysis["metrics"]["tam"] = tam
-            if tam > 10_000_000_000:
-                score += 15
-            elif tam > 1_000_000_000:
-                score += 10
+        def safe_get(d: Dict, key: str, default=None):
+            return d.get(key, default)
         
-        # Competitive advantages
-        advantages = company_profile.get("competitive_advantages", [])
-        if advantages:
-            analysis["metrics"]["competitive_advantages"] = advantages
-            score += min(15, len(advantages) * 5)
+        def fmt_money(val, currency="USD"):
+            if val is None:
+                return "Not Available"
+            return f"{currency} {val:,.0f}"
         
-        # Recurring revenue (would need more data)
-        analysis["details"].append("Recurring revenue analysis requires detailed revenue breakdown")
+        def fmt_pct(val):
+            if val is None:
+                return "Not Available"
+            return f"{val:.1%}"
         
-        analysis["score"] = max(0, min(100, score))
-        return analysis
-    
-    def _calculate_scores(self, *analyses) -> Dict[str, float]:
-        """Calculate weighted pillar scores."""
-        weights = {
-            "revenue": 0.25,
-            "profitability": 0.25,
-            "balance_sheet": 0.20,
-            "cash_flow": 0.15,
-            "valuation": 0.10,
-            "growth": 0.05,
+        def fmt_ratio(val):
+            if val is None:
+                return "Not Available"
+            return f"{val:.2f}x"
+
+        summary = {
+            "company_name": company_profile.get("common_name", "Unknown"),
+            "symbol": company_profile.get("ticker", "N/A"),
+            "exchange": company_profile.get("exchange", "N/A"),
+            "sector": company_profile.get("sector", "N/A"),
+            "industry": company_profile.get("industry", "N/A"),
+            "description": company_profile.get("description", "Not Available"),
+            "business_model": company_profile.get("business_model", "Not Available"),
+            "verified_financials": {
+                "latest_period": latest.get("period_end", "Not Available"),
+                "revenue": fmt_money(safe_get(latest, "revenue")),
+                "revenue_growth_yoy": fmt_pct(safe_get(latest, "revenue_growth_yoy")),
+                "revenue_growth_qoq": fmt_pct(safe_get(latest, "revenue_growth_qoq")),
+                "gross_profit": fmt_money(safe_get(latest, "gross_profit")),
+                "gross_margin": fmt_pct(safe_get(latest, "gross_margin")),
+                "operating_income": fmt_money(safe_get(latest, "operating_income")),
+                "operating_margin": fmt_pct(safe_get(latest, "operating_margin")),
+                "net_income": fmt_money(safe_get(latest, "net_income")),
+                "net_margin": fmt_pct(safe_get(latest, "net_margin")),
+                "ebitda": fmt_money(safe_get(latest, "ebitda")),
+                "ebitda_margin": fmt_pct(safe_get(latest, "ebitda_margin")),
+                "free_cash_flow": fmt_money(safe_get(latest, "free_cash_flow")),
+                "fcf_margin": fmt_pct(safe_get(latest, "fcf_margin")),
+                "cash_and_equivalents": fmt_money(safe_get(latest, "cash_and_equivalents")),
+                "total_debt": fmt_money(safe_get(latest, "total_debt")),
+                "total_equity": fmt_money(safe_get(latest, "total_equity")),
+                "debt_to_equity": fmt_ratio(safe_get(latest, "debt_to_equity")),
+                "current_ratio": fmt_ratio(safe_get(latest, "current_ratio")),
+                "quick_ratio": fmt_ratio(safe_get(latest, "quick_ratio")),
+                "roe": fmt_pct(safe_get(latest, "roe")),
+                "roic": fmt_pct(safe_get(latest, "roic")),
+            },
+            "historical_periods": len(financials),
+            "public_comps": [
+                {
+                    "symbol": c.get("symbol"),
+                    "name": c.get("name"),
+                    "market_cap": fmt_money(c.get("market_cap")) if c.get("market_cap") else "N/A",
+                    "ev_revenue": fmt_ratio(c.get("ev_revenue")),
+                    "ev_ebitda": fmt_ratio(c.get("ev_ebitda")),
+                    "pe_ratio": fmt_ratio(c.get("pe_ratio")),
+                    "revenue_growth": fmt_pct(c.get("revenue_growth")),
+                    "profit_margin": fmt_pct(c.get("profit_margin")),
+                }
+                for c in public_comps[:5]
+            ],
+            "company_info": {
+                "employees": company_profile.get("employees", "N/A"),
+                "headquarters": company_profile.get("headquarters", "N/A"),
+                "ceo": company_profile.get("ceo", "N/A"),
+                "website": company_profile.get("website", "N/A"),
+            },
         }
+        return summary
+
+    def _create_analysis_prompt(self, summary: Dict) -> str:
+        """Create the analysis prompt for the LLM."""
+        financials = summary["verified_financials"]
+        comps = summary["public_comps"]
         
-        pillar_names = [
-            "revenue_analysis",
-            "profitability_analysis",
-            "balance_sheet_analysis",
-            "cash_flow_analysis",
-            "valuation_analysis",
-            "growth_analysis",
-        ]
-        
-        scores = {}
-        for name, analysis in zip(pillar_names, analyses):
-            key = name.replace("_analysis", "")
-            scores[key] = analysis.get("score", 0) * weights.get(key, 0.1)
-        
-        return scores
-    
-    def _calculate_confidence(
-        self,
-        financials: List[Dict],
-        metrics: FinancialMetrics,
-    ) -> float:
-        """Calculate confidence based on data quality."""
-        confidence = 0.5
-        
-        # More periods = higher confidence
-        if len(financials) >= 8:
-            confidence += 0.2
-        elif len(financials) >= 4:
-            confidence += 0.1
-        
-        # Key metrics availability
-        key_metrics = [
-            metrics.revenue,
-            metrics.gross_margin,
-            metrics.operating_margin,
-            metrics.net_income,
-            metrics.free_cash_flow,
-            metrics.total_debt,
-            metrics.cash_and_equivalents,
-        ]
-        available = sum(1 for m in key_metrics if m is not None)
-        confidence += (available / len(key_metrics)) * 0.3
-        
-        return min(1.0, confidence)
-    
-    def _extract_key_metrics(self, metrics: FinancialMetrics) -> Dict[str, Any]:
-        """Extract key metrics for reporting."""
-        return {
-            "revenue": float(metrics.revenue.amount) if metrics.revenue else None,
-            "revenue_growth_yoy": metrics.revenue_growth_yoy.to_percent() if metrics.revenue_growth_yoy else None,
-            "gross_margin": metrics.gross_margin.to_percent() if metrics.gross_margin else None,
-            "operating_margin": metrics.operating_margin.to_percent() if metrics.operating_margin else None,
-            "net_margin": metrics.net_margin.to_percent() if metrics.net_margin else None,
-            "ebitda_margin": metrics.ebitda_margin.to_percent() if metrics.ebitda_margin else None,
-            "free_cash_flow": float(metrics.free_cash_flow.amount) if metrics.free_cash_flow else None,
-            "fcf_margin": metrics.fcf_margin.to_percent() if metrics.fcf_margin else None,
-            "cash": float(metrics.cash_and_equivalents.amount) if metrics.cash_and_equivalents else None,
-            "total_debt": float(metrics.total_debt.amount) if metrics.total_debt else None,
-            "debt_to_equity": metrics.debt_to_equity.value if metrics.debt_to_equity else None,
-            "current_ratio": metrics.current_ratio.value if metrics.current_ratio else None,
-            "roe": metrics.roe.to_percent() if metrics.roe else None,
-            "roic": metrics.roic.to_percent() if metrics.roic else None,
-        }
-    
-    def _identify_strengths(self, *analyses) -> List[str]:
-        """Identify key strengths from analyses."""
-        strengths = []
-        for analysis in analyses:
-            if analysis.get("score", 0) > 70:
-                pillar = analysis.get("pillar", "")
-                strengths.append(f"Strong {pillar.replace('_', ' ')}")
-        return strengths
-    
-    def _identify_weaknesses(self, *analyses) -> List[str]:
-        """Identify key weaknesses from analyses."""
-        weaknesses = []
-        for analysis in analyses:
-            if analysis.get("score", 0) < 40:
-                pillar = analysis.get("pillar", "")
-                weaknesses.append(f"Weak {pillar.replace('_', ' ')}")
-        return weaknesses
-    
-    def _identify_red_flags(
-        self,
-        metrics: FinancialMetrics,
-        financials: List[Dict],
-    ) -> List[str]:
-        """Identify red flags."""
-        flags = []
-        
-        if metrics.net_income and metrics.net_income.amount < 0:
-            flags.append("Negative net income")
-        
-        if metrics.free_cash_flow and metrics.free_cash_flow.amount < 0:
-            flags.append("Negative free cash flow")
-        
-        if metrics.total_debt and metrics.cash_and_equivalents:
-            if metrics.total_debt.amount > metrics.cash_and_equivalents.amount * 3:
-                flags.append("Debt significantly exceeds cash")
-        
-        if metrics.current_ratio and metrics.current_ratio.value < 1:
-            flags.append("Current ratio below 1.0")
-        
-        # Declining margins
-        if len(financials) >= 2:
-            latest_gm = financials[0].get("gross_margin")
-            prev_gm = financials[1].get("gross_margin")
-            if latest_gm and prev_gm and latest_gm < prev_gm - 0.05:
-                flags.append("Gross margin declining >500bps QoQ")
-        
-        return flags
-    
-    def _generate_reasoning(self, result: Dict) -> str:
-        """Generate human-readable reasoning."""
-        parts = [
-            f"Fundamental Analysis Score: {result['overall_score']:.1f}/100",
-            f"Confidence: {result['confidence']:.0%}",
-            "",
-            "Pillar Scores:",
-        ]
-        
-        for pillar, score in result["pillar_scores"].items():
-            parts.append(f"  - {pillar.replace('_', ' ').title()}: {score:.1f}")
-        
-        if result["strengths"]:
-            parts.append("\nKey Strengths:")
-            for s in result["strengths"]:
-                parts.append(f"  + {s}")
-        
-        if result["weaknesses"]:
-            parts.append("\nKey Weaknesses:")
-            for w in result["weaknesses"]:
-                parts.append(f"  - {w}")
-        
-        if result["red_flags"]:
-            parts.append("\n🚩 Red Flags:")
-            for flag in result["red_flags"]:
-                parts.append(f"  ⚠ {flag}")
-        
-        return "\n".join(parts)
-    
-    def _collect_evidence(
-        self,
-        metrics: FinancialMetrics,
-        financials: List[Dict],
-    ) -> List[str]:
-        """Collect evidence citations."""
+        prompt = f"""Analyze the following IPO candidate using ONLY the verified data provided below.
+
+COMPANY: {summary['company_name']} ({summary['symbol']})
+Exchange: {summary['exchange']}
+Sector: {summary['sector']}
+Industry: {summary['industry']}
+Description: {summary['description']}
+Business Model: {summary['business_model']}
+
+VERIFIED FINANCIAL DATA (Latest Period: {financials.get('latest_period', 'N/A')}):
+- Revenue: {financials.get('revenue')}
+- YoY Growth: {financials.get('revenue_growth_yoy')}
+- QoQ Growth: {financials.get('revenue_growth_qoq')}
+- Gross Profit: {financials.get('gross_profit')}
+- Gross Margin: {financials.get('gross_margin')}
+- Operating Income: {financials.get('operating_income')}
+- Operating Margin: {financials.get('operating_margin')}
+- Net Income: {financials.get('net_income')}
+- Net Margin: {financials.get('net_margin')}
+- EBITDA: {financials.get('ebitda')}
+- EBITDA Margin: {financials.get('ebitda_margin')}
+- Free Cash Flow: {financials.get('free_cash_flow')}
+- FCF Margin: {financials.get('fcf_margin')}
+- Cash & Equivalents: {financials.get('cash_and_equivalents')}
+- Total Debt: {financials.get('total_debt')}
+- Total Equity: {financials.get('total_equity')}
+- Debt/Equity: {financials.get('debt_to_equity')}
+- Current Ratio: {financials.get('current_ratio')}
+- Quick Ratio: {financials.get('quick_ratio')}
+- ROE: {financials.get('roe')}
+- ROIC: {financials.get('roic')}
+
+HISTORICAL DATA: {summary['historical_periods']} periods available
+
+PUBLIC COMPARABLES:
+{json.dumps(comps, indent=2)}
+
+COMPANY INFO:
+- Employees: {summary['company_info'].get('employees')}
+- HQ: {summary['company_info'].get('headquarters')}
+- CEO: {summary['company_info'].get('ceo')}
+
+REMEMBER: Use ONLY the data above. If a value says "Not Available", do not guess or infer it. Return null for unavailable data. Distinguish between VERIFIED FACTS (from data above) and YOUR ANALYSIS/INTERPRETATION."""
+        return prompt
+
+    def _extract_json(self, content: str) -> Dict:
+        """Extract JSON from LLM response."""
+        # Try to find JSON block
+        start = content.find('{')
+        end = content.rfind('}') + 1
+        if start >= 0 and end > start:
+            try:
+                return json.loads(content[start:end])
+            except json.JSONDecodeError:
+                pass
+        raise ValueError("Could not extract valid JSON from response")
+
+    def _collect_evidence(self, summary: Dict) -> List[str]:
+        """Collect evidence citations from verified data."""
+        financials = summary["verified_financials"]
         evidence = []
         
-        if metrics.revenue:
-            evidence.append(f"Revenue: ${metrics.revenue.amount:,.0f}")
-        if metrics.revenue_growth_yoy:
-            evidence.append(f"YoY Growth: {metrics.revenue_growth_yoy.to_percent():.1f}%")
-        if metrics.gross_margin:
-            evidence.append(f"Gross Margin: {metrics.gross_margin.to_percent():.1f}%")
-        if metrics.operating_margin:
-            evidence.append(f"Operating Margin: {metrics.operating_margin.to_percent():.1f}%")
-        if metrics.free_cash_flow:
-            evidence.append(f"FCF: ${metrics.free_cash_flow.amount:,.0f}")
-        if metrics.cash_and_equivalents:
-            evidence.append(f"Cash: ${metrics.cash_and_equivalents.amount:,.0f}")
-        if metrics.total_debt:
-            evidence.append(f"Total Debt: ${metrics.total_debt.amount:,.0f}")
+        if financials.get("revenue") != "Not Available":
+            evidence.append(f"Revenue: {financials['revenue']}")
+        if financials.get("revenue_growth_yoy") != "Not Available":
+            evidence.append(f"YoY Growth: {financials['revenue_growth_yoy']}")
+        if financials.get("gross_margin") != "Not Available":
+            evidence.append(f"Gross Margin: {financials['gross_margin']}")
+        if financials.get("operating_margin") != "Not Available":
+            evidence.append(f"Operating Margin: {financials['operating_margin']}")
+        if financials.get("free_cash_flow") != "Not Available":
+            evidence.append(f"FCF: {financials['free_cash_flow']}")
+        if financials.get("cash_and_equivalents") != "Not Available":
+            evidence.append(f"Cash: {financials['cash_and_equivalents']}")
+        if financials.get("total_debt") != "Not Available":
+            evidence.append(f"Total Debt: {financials['total_debt']}")
         
-        evidence.append(f"Periods analyzed: {len(financials)}")
+        evidence.append(f"Periods analyzed: {summary['historical_periods']}")
+        evidence.append(f"Public comps: {len(summary['public_comps'])}")
         
         return evidence

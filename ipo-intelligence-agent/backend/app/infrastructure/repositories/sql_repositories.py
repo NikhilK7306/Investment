@@ -25,6 +25,7 @@ from app.application.interfaces.repositories import (
     JobRepository,
     UserRepository,
     APIKeyRepository,
+    ChatRepository,
 )
 from app.domain.enums.enums import (
     IPOStatus,
@@ -54,6 +55,7 @@ from app.domain.entities.entities import (
     BestPracticeMemory,
     ReflectionMemory,
     Lesson,
+    OverallAnalysis,
 )
 from app.domain.value_objects.value_objects import (
     IPODetails,
@@ -83,6 +85,8 @@ from app.infrastructure.database.models import (
     JobModel,
     UserModel,
     APIKeyModel,
+    ConversationModel,
+    ChatMessageModel,
 )
 from app.domain.value_objects.value_objects import Money, Percentage, Ratio, PriceRange, Valuation
 
@@ -305,19 +309,55 @@ class SQLIPORepository(IPORepository):
             now = datetime.utcnow()
             day_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
             day_end = now.replace(hour=23, minute=59, second=59, microsecond=999999)
-            listed = or_(
-                IPOModel.status == IPOStatus.LISTED,
-                and_(IPOModel.listed_date.isnot(None), IPOModel.listed_date < day_start),
-            )
+            
+            # Phase determination should be based on actual IPO status
+            # An IPO is "listed" if its status is LISTED or it has a listed_date in the past
+            # An IPO is "current" if its status is PRICED/FILED and expected_date is today or past
+            # An IPO is "upcoming" if its status is ANNOUNCED/FILED and expected_date is in the future
             if phase == "upcoming":
-                conditions.append(not_(listed))
-                conditions.append(or_(IPOModel.expected_date.is_(None), IPOModel.expected_date > day_end))
+                conditions.append(
+                    or_(
+                        IPOModel.status.in_([IPOStatus.ANNOUNCED, IPOStatus.FILED]),
+                        and_(
+                            IPOModel.expected_date.isnot(None),
+                            IPOModel.expected_date > day_end
+                        )
+                    )
+                )
+                conditions.append(
+                    not_(
+                        or_(
+                            IPOModel.status == IPOStatus.LISTED,
+                            and_(IPOModel.listed_date.isnot(None), IPOModel.listed_date < day_start)
+                        )
+                    )
+                )
             elif phase == "current":
-                conditions.append(not_(listed))
-                conditions.append(IPOModel.expected_date.isnot(None))
-                conditions.append(IPOModel.expected_date <= day_end)
+                conditions.append(
+                    or_(
+                        IPOModel.status.in_([IPOStatus.PRICED, IPOStatus.FILED]),
+                        and_(
+                            IPOModel.expected_date.isnot(None),
+                            IPOModel.expected_date <= day_end,
+                            IPOModel.expected_date >= day_start
+                        )
+                    )
+                )
+                conditions.append(
+                    not_(
+                        or_(
+                            IPOModel.status == IPOStatus.LISTED,
+                            and_(IPOModel.listed_date.isnot(None), IPOModel.listed_date < day_start)
+                        )
+                    )
+                )
             elif phase == "listed":
-                conditions.append(listed)
+                conditions.append(
+                    or_(
+                        IPOModel.status == IPOStatus.LISTED,
+                        and_(IPOModel.listed_date.isnot(None), IPOModel.listed_date < day_start)
+                    )
+                )
 
         if from_date:
             conditions.append(IPOModel.expected_date >= from_date)
@@ -458,6 +498,17 @@ class SQLIPORepository(IPORepository):
             greenshoe_shares=model.overallotment_shares,
             prospectus_url=model.prospectus_url or "",
             company_id=model.company_id,
+            created_at=model.created_at,
+            source=model.source,
+            source_reference=model.source_reference,
+            source_updated_at=model.source_updated_at,
+            collector_version=model.collector_version,
+            data_quality_score=model.data_quality_score,
+            last_verified_at=model.last_verified_at,
+            issue_size=Money(model.issue_size, currency) if model.issue_size else None,
+            face_value=Money(model.face_value, currency) if model.face_value else None,
+            lot_size=model.lot_size,
+            registrar=model.registrar,
         )
 
 
@@ -828,6 +879,45 @@ class SQLAnalysisRepository(SQLBaseRepository, AnalysisRepository):
             if symbol_row:
                 symbol = symbol_row
         return self._to_dict(model, symbol=symbol)
+
+    async def get_running_analysis(self, symbol: str) -> Optional[OverallAnalysis]:
+        """Get currently running analysis for symbol."""
+        result = await self.session.execute(
+            self._select_with_symbol(symbol)
+            .where(AnalysisModel.status == AnalysisStatus.RUNNING)
+            .order_by(desc(AnalysisModel.created_at))
+            .limit(1)
+        )
+        row = result.first()
+        if not row:
+            return None
+        model, symbol_value = row
+        return self._to_dict(model, symbol=symbol_value)
+
+    async def get_recent_completed_analysis(
+        self,
+        symbol: str,
+        hours: int = 1,
+    ) -> Optional[OverallAnalysis]:
+        """Get recently completed analysis for symbol within specified hours."""
+        from datetime import timedelta
+        cutoff = datetime.utcnow() - timedelta(hours=hours)
+        result = await self.session.execute(
+            self._select_with_symbol(symbol)
+            .where(
+                and_(
+                    AnalysisModel.status == AnalysisStatus.COMPLETED,
+                    AnalysisModel.created_at >= cutoff,
+                )
+            )
+            .order_by(desc(AnalysisModel.created_at))
+            .limit(1)
+        )
+        row = result.first()
+        if not row:
+            return None
+        model, symbol_value = row
+        return self._to_dict(model, symbol=symbol_value)
 
     async def save_score_breakdown(
         self,
@@ -2280,6 +2370,209 @@ class SQLAPIKeyRepository(SQLBaseRepository, APIKeyRepository):
             }
             for m in models
         ]
+
+
+async def list_keys(self, user_id: UUID) -> List[Dict[str, Any]]:
+        """List user's API keys."""
+        result = await self.session.execute(
+            select(APIKeyModel).where(APIKeyModel.user_id == user_id)
+        )
+        models = result.scalars().all()
+        return [
+            {
+                "id": str(m.id),
+                "name": m.name,
+                "scopes": m.scopes,
+                "is_active": m.is_active,
+                "expires_at": m.expires_at.isoformat() if m.expires_at else None,
+                "last_used": m.last_used.isoformat() if m.last_used else None,
+                "created_at": m.created_at.isoformat(),
+            }
+            for m in models
+        ]
+
+
+class SQLChatRepository(SQLBaseRepository, ChatRepository):
+    """SQL implementation of chat repository."""
+
+    entity_model = None  # We'll use raw SQL queries
+
+    def __init__(self, session: AsyncSession):
+        self.session = session
+
+    async def create_conversation(
+        self,
+        title: str,
+        ipo_symbol: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> UUID:
+        """Create a new conversation."""
+        from app.infrastructure.database.models import ConversationModel, ChatMessageModel
+        
+        model = ConversationModel(
+            title=title,
+            ipo_symbol=ipo_symbol,
+            user_id=user_id,
+        )
+        self.session.add(model)
+        await self.session.flush()
+        return model.id
+
+    async def get_conversation(self, conversation_id: UUID) -> Optional[Dict[str, Any]]:
+        """Get conversation by ID."""
+        from app.infrastructure.database.models import ConversationModel
+        
+        result = await self.session.execute(
+            select(ConversationModel).where(ConversationModel.id == conversation_id)
+        )
+        model = result.scalar_one_or_none()
+        if model:
+            return {
+                "id": str(model.id),
+                "title": model.title,
+                "ipo_symbol": model.ipo_symbol,
+                "user_id": model.user_id,
+                "created_at": model.created_at,
+                "updated_at": model.updated_at,
+                "message_count": model.message_count,
+            }
+        return None
+
+    async def list_conversations(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+        user_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List conversations."""
+        from app.infrastructure.database.models import ConversationModel
+        
+        query = select(ConversationModel).order_by(ConversationModel.updated_at.desc())
+        if user_id:
+            query = query.where(ConversationModel.user_id == user_id)
+        query = query.limit(limit).offset(offset)
+        
+        result = await self.session.execute(query)
+        models = result.scalars().all()
+        
+        return [
+            {
+                "id": str(m.id),
+                "title": m.title,
+                "ipo_symbol": m.ipo_symbol,
+                "user_id": m.user_id,
+                "created_at": m.created_at,
+                "updated_at": m.updated_at,
+                "message_count": m.message_count,
+            }
+            for m in models
+        ]
+
+    async def update_conversation(
+        self,
+        conversation_id: UUID,
+        title: Optional[str] = None,
+        updated_at: Optional[datetime] = None,
+    ) -> bool:
+        """Update conversation."""
+        from app.infrastructure.database.models import ConversationModel
+        
+        result = await self.session.execute(
+            select(ConversationModel).where(ConversationModel.id == conversation_id)
+        )
+        model = result.scalar_one_or_none()
+        if model:
+            if title is not None:
+                model.title = title
+            if updated_at is not None:
+                model.updated_at = updated_at
+            else:
+                model.updated_at = datetime.utcnow()
+            return True
+        return False
+
+    async def delete_conversation(self, conversation_id: UUID) -> bool:
+        """Delete conversation."""
+        # Delete messages first (cascade)
+        await self.session.execute(
+            delete(ChatMessageModel).where(ChatMessageModel.conversation_id == conversation_id)
+        )
+        
+        # Delete conversation
+        result = await self.session.execute(
+            delete(ConversationModel).where(ConversationModel.id == conversation_id)
+        )
+        return result.rowcount > 0
+
+    async def add_message(self, message: Dict[str, Any]) -> UUID:
+        """Add message to conversation."""
+        model = ChatMessageModel(
+            conversation_id=message["conversation_id"],
+            role=message["role"],
+            content=message["content"],
+            agent=message.get("agent"),
+            metadata=message.get("metadata", {}),
+        )
+        self.session.add(model)
+        await self.session.flush()
+        
+        # Update conversation message count and updated_at
+        conv_result = await self.session.execute(
+            select(ConversationModel).where(ConversationModel.id == message["conversation_id"])
+        )
+        conv_model = conv_result.scalar_one_or_none()
+        if conv_model:
+            conv_model.message_count += 1
+            conv_model.updated_at = datetime.utcnow()
+        
+        return model.id
+
+    async def get_messages(
+        self,
+        conversation_id: UUID,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Get messages for a conversation."""
+        result = await self.session.execute(
+            select(ChatMessageModel)
+            .where(ChatMessageModel.conversation_id == conversation_id)
+            .order_by(ChatMessageModel.created_at.asc())
+            .limit(limit)
+            .offset(offset)
+        )
+        models = result.scalars().all()
+        
+        return [
+            {
+                "id": str(m.id),
+                "conversation_id": str(m.conversation_id),
+                "role": m.role,
+                "content": m.content,
+                "agent": m.agent,
+                "metadata": m.metadata,
+                "created_at": m.created_at,
+            }
+            for m in models
+        ]
+
+    async def get_message(self, message_id: UUID) -> Optional[Dict[str, Any]]:
+        """Get message by ID."""
+        result = await self.session.execute(
+            select(ChatMessageModel).where(ChatMessageModel.id == message_id)
+        )
+        model = result.scalar_one_or_none()
+        if model:
+            return {
+                "id": str(model.id),
+                "conversation_id": str(model.conversation_id),
+                "role": model.role,
+                "content": model.content,
+                "agent": model.agent,
+                "metadata": model.metadata,
+                "created_at": model.created_at,
+            }
+        return None
 
 
 # Need to add the missing AnalysisModel and ReportModel to models.py

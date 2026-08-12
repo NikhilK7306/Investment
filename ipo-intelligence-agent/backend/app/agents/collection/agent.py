@@ -82,12 +82,97 @@ Return structured, validated data with source attribution and confidence scores.
             "validate_financial_data",
         ]
 
+    """Collection Agent - Collects comprehensive financial and alternative data for IPO analysis."""
+
+import asyncio
+from datetime import datetime, timedelta
+from typing import Any, Dict, List, Optional
+
+import httpx
+
+from app.agents.base import BaseAgent, AgentContext, AgentResult
+from app.domain.enums.enums import AgentName, AgentStatus, DataSource
+from app.domain.entities.entities import Company, FinancialStatement
+from app.domain.value_objects.value_objects import IPODetails
+from app.domain.value_objects.value_objects import Money, Percentage
+from app.core.exceptions.base import AgentError
+from app.infrastructure.external_services import get_provider_registry
+
+
+class CollectionAgent(BaseAgent[Dict[str, Any], Dict[str, Any]]):
+    """Agent that collects financial data, news, social sentiment, and alternative data."""
+
+    def __init__(self):
+        super().__init__(
+            name=AgentName.COLLECTION,
+            description="Collects comprehensive data from financial APIs, SEC filings, news, social media, and alternative sources",
+            version="2.0.0",
+            max_retries=3,
+            timeout_seconds=300,
+        )
+        self._http_client: Optional[httpx.AsyncClient] = None
+
+    @property
+    def system_prompt(self) -> str:
+        return """You are a Data Collection Agent for IPO Intelligence.
+
+Your task is to gather comprehensive data for IPO analysis from multiple sources:
+
+1. FINANCIAL DATA
+   - SEC EDGAR filings (S-1, F-1, 10-K, 10-Q, 8-K)
+   - Financial statements (income, balance sheet, cash flow)
+   - Key metrics and ratios
+   - Historical financials (3-5 years)
+
+2. MARKET DATA
+   - Trading comparables (public peers)
+   - Valuation multiples
+   - Sector/industry benchmarks
+   - Recent IPO performance
+
+3. NEWS & MEDIA
+   - Financial news (Bloomberg, Reuters, FT, WSJ)
+   - Press releases
+   - Analyst reports and ratings
+   - Regulatory filings
+
+4. SOCIAL & ALTERNATIVE DATA
+   - Social media sentiment (Twitter/X, Reddit, StockTwits)
+   - Web traffic and app analytics
+   - Job postings and hiring trends
+   - Credit card transaction data
+   - Satellite/geospatial data
+
+5. COMPANY INFORMATION
+   - Management team and board
+   - Business model and strategy
+   - Competitive landscape
+   - Cap table and ownership
+
+Return structured, validated data with source attribution and confidence scores.
+All data must include source provenance (source, source_reference, retrieved_at)."""
+
+    @property
+    def available_tools(self) -> List[str]:
+        return [
+            "fetch_sec_filings",
+            "fetch_financial_statements",
+            "fetch_company_profile",
+            "fetch_public_comps",
+            "fetch_news_articles",
+            "fetch_analyst_reports",
+            "fetch_social_sentiment",
+            "fetch_alternative_data",
+            "fetch_ipo_details",
+            "validate_financial_data",
+        ]
+
     async def execute(
         self,
         context: AgentContext,
         input_data: Dict[str, Any],
     ) -> AgentResult[Dict[str, Any]]:
-        """Execute data collection."""
+        """Execute data collection using provider registry."""
         start_time = datetime.utcnow()
 
         try:
@@ -98,14 +183,17 @@ Return structured, validated data with source attribution and confidence scores.
             # Initialize HTTP client
             await self._init_http_client()
 
+            # Get provider registry
+            registry = get_provider_registry()
+
             # Collect data in parallel
             tasks = [
                 self._collect_financial_data(symbol, ipo_details),
                 self._collect_company_profile(symbol, ipo_details),
                 self._collect_public_comps(symbol, ipo_details),
-                self._collect_news_and_media(symbol, ipo_details),
-                self._collect_social_sentiment(symbol),
-                self._collect_alternative_data(symbol),
+                self._collect_news_and_media(symbol, ipo_details, registry),
+                self._collect_social_sentiment(symbol, ipo_details, registry),
+                self._collect_alternative_data(symbol, registry),
                 self._collect_ipo_specific_data(symbol, ipo_details),
             ]
 
@@ -174,111 +262,112 @@ Return structured, validated data with source attribution and confidence scores.
         symbol: str,
         ipo_details: Dict,
     ) -> Dict[str, Any]:
-        """Collect financial statements and metrics."""
-        financials = {"statements": [], "metrics": {}, "ratios": {}}
-
-        try:
-            # Try yfinance first
-            ticker = yf.Ticker(symbol)
-            
-            # Get financial statements
-            income_stmt = ticker.income_stmt
-            balance_sheet = ticker.balance_sheet
-            cash_flow = ticker.cashflow
-
-            if not income_stmt.empty:
-                financials["statements"] = self._parse_financial_statements(
-                    income_stmt, balance_sheet, cash_flow
-                )
-                financials["metrics"] = self._calculate_key_metrics(
-                    income_stmt, balance_sheet, cash_flow
-                )
-                financials["ratios"] = self._calculate_ratios(
-                    income_stmt, balance_sheet, cash_flow
-                )
-        except Exception as e:
-            financials["error"] = f"yfinance error: {str(e)}"
-
-        # Try SEC EDGAR for pre-IPO companies
-        if not financials["statements"]:
-            financials["sec_filings"] = await self._fetch_sec_filings(
-                symbol, str(ipo_details.get("company_name", ""))
-            )
-
-        return financials
-
-    def _parse_financial_statements(
-        self,
-        income_stmt,
-        balance_sheet,
-        cash_flow,
-    ) -> List[Dict]:
-        """Parse yfinance financial statements."""
-        statements = []
+        """Collect financial statements and metrics using provider fallback chain."""
+        financials = {"statements": [], "metrics": {}, "ratios": {}, "sources": [], "errors": []}
         
-        # Get common dates
-        dates = income_stmt.columns.tolist()
+        # Get financial providers from registry (fallback chain)
+        registry = get_provider_registry()
+        financial_providers = registry.get_financial_providers()
         
-        for date in dates[:8]:  # Last 8 periods
+        # Try each financial provider in order
+        for provider in financial_providers:
+            if not provider.config.enabled:
+                continue
+                
             try:
-                stmt = {
-                    "period_end": date.isoformat() if hasattr(date, 'isoformat') else str(date),
-                    "period_type": "quarterly" if len(dates) > 4 else "annual",
-                    "revenue": self._safe_get(income_stmt, "Total Revenue", date),
-                    "gross_profit": self._safe_get(income_stmt, "Gross Profit", date),
-                    "operating_income": self._safe_get(income_stmt, "Operating Income", date),
-                    "net_income": self._safe_get(income_stmt, "Net Income", date),
-                    "ebitda": self._safe_get(income_stmt, "EBITDA", date),
-                    "eps_diluted": self._safe_get(income_stmt, "Diluted EPS", date),
-                    "total_assets": self._safe_get(balance_sheet, "Total Assets", date),
-                    "total_liabilities": self._safe_get(balance_sheet, "Total Liabilities", date),
-                    "total_equity": self._safe_get(balance_sheet, "Total Equity", date),
-                    "cash": self._safe_get(balance_sheet, "Cash And Cash Equivalents", date),
-                    "total_debt": self._safe_get(balance_sheet, "Total Debt", date),
-                    "operating_cash_flow": self._safe_get(cash_flow, "Operating Cash Flow", date),
-                    "free_cash_flow": self._safe_get(cash_flow, "Free Cash Flow", date),
-                    "capex": self._safe_get(cash_flow, "Capital Expenditure", date),
-                }
-                statements.append(stmt)
+                # First try to fetch financials for listed companies
+                result = await provider.fetch_financials(symbol, periods=8)
+                
+                if result.success and result.data:
+                    statements = result.data.get("statements", [])
+                    if statements:
+                        financials["statements"] = statements
+                        financials["metrics"] = self._calculate_metrics_from_statements(statements)
+                        financials["ratios"] = self._calculate_ratios_from_statements(statements)
+                        financials["sources"].append({
+                            "provider": result.source,
+                            "reference": result.source_reference,
+                            "retrieved_at": result.retrieved_at.isoformat() if hasattr(result.retrieved_at, 'isoformat') else str(result.retrieved_at),
+                            "periods": len(statements),
+                        })
+                        break  # Success - stop fallback chain
+                
+            except Exception as e:
+                financials["errors"].append({
+                    "provider": provider.name,
+                    "error": str(e),
+                    "error_type": type(e).__name__,
+                })
+                continue
+        
+        # If no financial data found and it's a pre-IPO company, try DRHP extraction
+        if not financials["statements"] and ipo_details.get("prospectus_url"):
+            try:
+                drhp_provider = next((p for p in financial_providers if p.name == "drhp_document"), None)
+                if drhp_provider:
+                    company_name = ipo_details.get("company_name", symbol)
+                    drhp_result = await drhp_provider.fetch_drhp_financials(
+                        symbol=symbol,
+                        company_name=company_name,
+                        ipo_details=ipo_details,
+                    )
+                    if drhp_result.success and drhp_result.data:
+                        statements = drhp_result.data.get("statements", [])
+                        if statements:
+                            financials["statements"] = statements
+                            financials["metrics"] = self._calculate_metrics_from_statements(statements)
+                            financials["ratios"] = self._calculate_ratios_from_statements(statements)
+                            financials["sources"].append({
+                                "provider": drhp_result.source,
+                                "reference": drhp_result.source_reference,
+                                "retrieved_at": drhp_result.retrieved_at.isoformat() if hasattr(drhp_result.retrieved_at, 'isoformat') else str(drhp_result.retrieved_at),
+                                "periods": len(statements),
+                                "extraction_method": drhp_result.data.get("extraction_method", "pdf_parsing"),
+                            })
+            except Exception as e:
+                financials["errors"].append({
+                    "provider": "drhp_document",
+                    "error": f"DRHP extraction failed: {str(e)}",
+                    "error_type": type(e).__name__,
+                })
+        
+        # Also try to fetch company profile from financial providers
+        for provider in financial_providers:
+            if not provider.config.enabled or provider.name == "drhp_document":
+                continue
+            try:
+                profile_result = await provider.fetch_company_profile(symbol)
+                if profile_result.success and profile_result.data:
+                    financials["company_profile"] = profile_result.data
+                    financials["sources"].append({
+                        "provider": profile_result.source,
+                        "reference": profile_result.source_reference,
+                        "type": "company_profile",
+                    })
+                    break
             except Exception:
                 continue
-
-        return statements
-
-    def _safe_get(self, df, row: str, date) -> Optional[float]:
-        """Safely get value from DataFrame."""
-        try:
-            if row in df.index:
-                val = df.loc[row, date]
-                return float(val) if val is not None else None
-        except Exception:
-            pass
-        return None
-
-    def _calculate_key_metrics(
-        self,
-        income_stmt,
-        balance_sheet,
-        cash_flow,
-    ) -> Dict[str, Any]:
-        """Calculate key financial metrics."""
-        latest_date = income_stmt.columns[0]
         
-        revenue = self._safe_get(income_stmt, "Total Revenue", latest_date)
-        gross_profit = self._safe_get(income_stmt, "Gross Profit", latest_date)
-        operating_income = self._safe_get(income_stmt, "Operating Income", latest_date)
-        net_income = self._safe_get(income_stmt, "Net Income", latest_date)
-        ebitda = self._safe_get(income_stmt, "EBITDA", latest_date)
-        
-        total_assets = self._safe_get(balance_sheet, "Total Assets", latest_date)
-        total_equity = self._safe_get(balance_sheet, "Total Equity", latest_date)
-        cash = self._safe_get(balance_sheet, "Cash And Cash Equivalents", latest_date)
-        total_debt = self._safe_get(balance_sheet, "Total Debt", latest_date)
-        
-        ocf = self._safe_get(cash_flow, "Operating Cash Flow", latest_date)
-        fcf = self._safe_get(cash_flow, "Free Cash Flow", latest_date)
+        return financials
 
+    def _calculate_metrics_from_statements(self, statements: List[Dict]) -> Dict[str, Any]:
+        """Calculate key financial metrics from statements."""
+        if not statements:
+            return {}
+        
+        latest = statements[0]
         metrics = {}
+        
+        revenue = latest.get("revenue")
+        gross_profit = latest.get("gross_profit")
+        operating_income = latest.get("operating_income")
+        net_income = latest.get("net_income")
+        ebitda = latest.get("ebitda")
+        total_assets = latest.get("total_assets")
+        total_equity = latest.get("total_equity")
+        cash = latest.get("cash_and_equivalents")
+        total_debt = latest.get("total_debt")
+        fcf = latest.get("free_cash_flow")
         
         if revenue and revenue > 0:
             if gross_profit:
@@ -289,6 +378,8 @@ Return structured, validated data with source attribution and confidence scores.
                 metrics["net_margin"] = net_income / revenue
             if ebitda:
                 metrics["ebitda_margin"] = ebitda / revenue
+            if fcf:
+                metrics["fcf_margin"] = fcf / revenue
         
         if total_assets and total_assets > 0:
             if net_income:
@@ -305,30 +396,29 @@ Return structured, validated data with source attribution and confidence scores.
         
         if fcf and net_income and net_income > 0:
             metrics["fcf_conversion"] = fcf / net_income
-
-        # Growth metrics (YoY)
-        if len(income_stmt.columns) >= 2:
-            prev_date = income_stmt.columns[1]
-            prev_revenue = self._safe_get(income_stmt, "Total Revenue", prev_date)
+        
+        # Growth metrics (YoY) - need at least 2 periods
+        if len(statements) >= 2:
+            prev = statements[1]
+            prev_revenue = prev.get("revenue")
             if revenue and prev_revenue and prev_revenue > 0:
                 metrics["revenue_growth_yoy"] = (revenue - prev_revenue) / prev_revenue
-
+        
         return metrics
 
-    def _calculate_ratios(
-        self,
-        income_stmt,
-        balance_sheet,
-        cash_flow,
-    ) -> Dict[str, float]:
-        """Calculate financial ratios."""
-        latest_date = income_stmt.columns[0]
+    def _calculate_ratios_from_statements(self, statements: List[Dict]) -> Dict[str, float]:
+        """Calculate financial ratios from statements."""
+        if not statements:
+            return {}
         
-        current_assets = self._safe_get(balance_sheet, "Current Assets", latest_date)
-        current_liabilities = self._safe_get(balance_sheet, "Current Liabilities", latest_date)
-        inventory = self._safe_get(balance_sheet, "Inventory", latest_date)
-        
+        latest = statements[0]
         ratios = {}
+        
+        current_assets = latest.get("total_current_assets")
+        current_liabilities = latest.get("total_current_liabilities")
+        inventory = latest.get("inventory")
+        ebitda = latest.get("ebitda")
+        interest_expense = latest.get("interest_expense")
         
         if current_assets and current_liabilities and current_liabilities > 0:
             ratios["current_ratio"] = current_assets / current_liabilities
@@ -336,11 +426,9 @@ Return structured, validated data with source attribution and confidence scores.
                 ratios["quick_ratio"] = (current_assets - inventory) / current_liabilities
         
         # Interest coverage
-        ebitda = self._safe_get(income_stmt, "EBITDA", latest_date)
-        interest_expense = self._safe_get(income_stmt, "Interest Expense", latest_date)
         if ebitda and interest_expense and interest_expense > 0:
             ratios["interest_coverage"] = ebitda / interest_expense
-
+        
         return ratios
 
     async def _fetch_sec_filings(self, symbol: str, company_name: str = "") -> List[Dict]:
@@ -528,37 +616,107 @@ Return structured, validated data with source attribution and confidence scores.
         self,
         symbol: str,
         ipo_details: Dict,
+        registry,
     ) -> Dict[str, Any]:
-        """Collect news articles and analyst reports."""
+        """Collect news articles and analyst reports using news providers."""
         news = []
         analyst_reports = []
         
-        # In production, integrate with news APIs (Bloomberg, Reuters, etc.)
-        # For now, return structured placeholder
+        # Get news providers
+        news_providers = registry.get_news_providers()
+        
+        for provider in news_providers:
+            if not provider.config.enabled:
+                continue
+            
+            try:
+                result = await provider.fetch_news(
+                    query=symbol,
+                    limit=20,
+                    from_date=datetime.utcnow() - timedelta(days=30),
+                )
+                
+                if result.success and result.data:
+                    # Add source metadata to each article
+                    for article in result.data:
+                        article["_source"] = result.source
+                        article["_source_reference"] = result.source_reference
+                        article["_retrieved_at"] = result.retrieved_at.isoformat()
+                    news.extend(result.data)
+                    
+            except Exception as e:
+                # Log but continue with other providers
+                pass
+        
         return {
             "news": news,
             "analyst_reports": analyst_reports,
         }
 
-    async def _collect_social_sentiment(self, symbol: str) -> Dict[str, Any]:
-        """Collect social media sentiment data."""
-        # In production, integrate with Twitter API, Reddit API, StockTwits
-        return {
+    async def _collect_social_sentiment(
+        self,
+        symbol: str,
+        ipo_details: Dict,
+        registry,
+    ) -> Dict[str, Any]:
+        """Collect social media sentiment data using social providers."""
+        # Note: Social providers are not in the news provider registry
+        # They would be in a separate social provider registry
+        # For now, return empty structure - social providers need separate integration
+        
+        social_data = {
             "twitter": [],
             "reddit": [],
             "stocktwits": [],
             "aggregated_score": 0.0,
         }
+        
+        # Try to get social data from news providers that include social
+        # (e.g., Alpha Vantage includes some social sentiment)
+        news_providers = registry.get_news_providers()
+        
+        for provider in news_providers:
+            if not provider.config.enabled:
+                continue
+            
+            if provider.name == "alphavantage_news":
+                try:
+                    result = await provider.fetch_news(
+                        query=symbol,
+                        limit=50,
+                        from_date=datetime.utcnow() - timedelta(days=7),
+                    )
+                    
+                    if result.success and result.data:
+                        # Extract sentiment from Alpha Vantage data
+                        for article in result.data:
+                            sentiment_score = article.get("sentiment_score")
+                            if sentiment_score is not None:
+                                social_data["aggregated_score"] += sentiment_score
+                        
+                        if social_data["aggregated_score"] != 0:
+                            social_data["aggregated_score"] /= len(result.data)
+                            
+                except Exception:
+                    pass
+        
+        return social_data
 
-    async def _collect_alternative_data(self, symbol: str) -> Dict[str, Any]:
+    async def _collect_alternative_data(
+        self,
+        symbol: str,
+        registry,
+    ) -> Dict[str, Any]:
         """Collect alternative data signals."""
         # In production, integrate with alternative data providers
+        # For now, return structured placeholder with source tracking
         return {
             "web_traffic": [],
             "app_downloads": [],
             "job_postings": [],
             "credit_card_spend": [],
             "employee_reviews": [],
+            "_sources": [],
         }
 
     async def _collect_ipo_specific_data(
@@ -587,14 +745,26 @@ Return structured, validated data with source attribution and confidence scores.
         """Assess overall data quality."""
         score = 0.0
         
+        # Financial data quality
         if financials.get("statements"):
             score += 0.3
+            # Bonus for multiple periods
+            if len(financials["statements"]) >= 4:
+                score += 0.1
         if financials.get("metrics"):
-            score += 0.15
+            score += 0.1
+        if financials.get("company_profile"):
+            score += 0.1
+        
+        # Profile quality
         if profile.get("legal_name"):
             score += 0.15
+        
+        # Comps quality
         if comps:
-            score += 0.2
+            score += 0.15
+        
+        # News quality
         if news.get("news"):
             score += 0.1
         if news.get("analyst_reports"):
@@ -604,9 +774,25 @@ Return structured, validated data with source attribution and confidence scores.
 
     def _get_sources_used(self, results: List) -> List[str]:
         """Get list of sources used."""
-        sources = ["yfinance"]
-        if any(r.get("sec_filings") for r in results if isinstance(r, dict)):
-            sources.append("sec_edgar")
+        sources = []
+        
+        # Financial sources from results
+        for r in results:
+            if isinstance(r, dict):
+                # Financial data sources
+                if "financials" in r and r["financials"].get("sources"):
+                    for src in r["financials"]["sources"]:
+                        if src.get("provider") and src["provider"] not in sources:
+                            sources.append(src["provider"])
+                # News sources
+                if "news" in r:
+                    for article in r.get("news", []):
+                        if "_source" in article and article["_source"] not in sources:
+                            sources.append(article["_source"])
+                # SEC filings
+                if r.get("sec_filings"):
+                    sources.append("sec_edgar")
+        
         return sources
 
     def _collect_evidence(self, result_data: Dict) -> List[str]:

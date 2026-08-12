@@ -6,11 +6,24 @@ export interface IPOResponse {
   industry: string
   status: string
   expected_date: string | null
+  listed_date: string | null
   price_range: { low: number; high: number } | null
   shares_offered: number | null
   valuation: { enterprise_value: number; equity_value: number } | null
   underwriters: string[]
   lead_underwriter: string
+  issue_size: number | null
+  face_value: number | null
+  lot_size: number | null
+  registrar: string | null
+  source: string | null
+  source_reference: string | null
+  source_updated_at: string | null
+  collector_version: string | null
+  data_quality_score: number | null
+  last_verified_at: string | null
+  data_age_days: number | null
+  source_age_days: number | null
 }
 
 export interface FinancialPeriod {

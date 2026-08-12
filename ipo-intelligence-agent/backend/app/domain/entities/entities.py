@@ -346,6 +346,75 @@ class OverallAnalysis:
 
 
 @dataclass
+class InvestmentThesis:
+    """Investment thesis entity."""
+    id: UUID = field(default_factory=uuid4)
+    analysis_id: UUID = field(default_factory=uuid4)
+    bull_case: str = ""
+    bear_case: str = ""
+    key_drivers: List[str] = field(default_factory=list)
+    key_risks: List[str] = field(default_factory=list)
+    catalysts: List[str] = field(default_factory=list)
+    assumptions: List[str] = field(default_factory=list)
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    updated_at: datetime = field(default_factory=datetime.utcnow)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class RiskFactor:
+    """Risk factor entity."""
+    id: UUID = field(default_factory=uuid4)
+    analysis_id: UUID = field(default_factory=uuid4)
+    category: str = ""
+    factor: str = ""
+    severity: str = ""
+    probability: float = 0.0
+    impact: float = 0.0
+    description: str = ""
+    evidence: List[str] = field(default_factory=list)
+    mitigation: str = ""
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class ScoreComponent:
+    """Score component breakdown."""
+    id: UUID = field(default_factory=uuid4)
+    analysis_id: UUID = field(default_factory=uuid4)
+    name: str = ""
+    weight: float = 0.0
+    score: float = 0.0
+    reasoning: str = ""
+    evidence: List[str] = field(default_factory=list)
+    sub_components: List[Dict[str, Any]] = field(default_factory=list)
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class Prediction:
+    """Prediction entity."""
+    id: UUID = field(default_factory=uuid4)
+    analysis_id: UUID = field(default_factory=uuid4)
+    prediction_type: str = ""
+    predicted_value: float = 0.0
+    lower_bound: float = 0.0
+    upper_bound: float = 0.0
+    confidence: float = 0.5
+    time_horizon: str = ""
+    methodology: str = ""
+    assumptions: List[str] = field(default_factory=list)
+    actual_value: Optional[float] = None
+    accuracy: Optional[float] = None
+    outcome_status: str = "pending"
+    verified_at: Optional[datetime] = None
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class Report:
     """Investment research report."""
     id: UUID = field(default_factory=uuid4)
@@ -529,3 +598,35 @@ class Lesson:
     updated_at: datetime = field(default_factory=datetime.utcnow)
     version: int = 1
     supersedes: Optional[UUID] = None
+
+
+@dataclass
+class Conversation:
+    """Chat conversation entity."""
+    id: UUID = field(default_factory=uuid4)
+    user_id: Optional[str] = None
+    session_id: str = ""
+    ipo_symbol: Optional[str] = None
+    title: str = ""
+    context_data: Dict[str, Any] = field(default_factory=dict)
+    created_at: datetime = field(default_factory=datetime.utcnow)
+    updated_at: datetime = field(default_factory=datetime.utcnow)
+    message_count: int = 0
+
+
+@dataclass
+class ChatMessage:
+    """Chat message entity."""
+    id: UUID = field(default_factory=uuid4)
+    conversation_id: UUID = field(default_factory=uuid4)
+    role: str = ""  # user, assistant, system
+    content: str = ""
+    agent_name: Optional[str] = None
+    ipo_symbol: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+    tokens_used: int = 0
+    created_at: datetime = field(default_factory=datetime.utcnow)
+
+
+# Alias for backward compatibility
+Analysis = OverallAnalysis

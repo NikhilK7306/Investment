@@ -23,7 +23,11 @@ target_metadata = Base.metadata
 
 def get_url():
     """Get database URL from environment or config."""
-    return os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/ipo_intelligence")
+    url = os.getenv("DATABASE_URL", "postgresql+asyncpg://postgres:postgres@localhost:5432/ipo_intelligence")
+    # Convert async URL to sync for alembic
+    if url.startswith("postgresql+asyncpg://"):
+        url = url.replace("postgresql+asyncpg://", "postgresql+psycopg2://")
+    return url
 
 
 def run_migrations_offline() -> None:

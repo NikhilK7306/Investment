@@ -1,25 +1,125 @@
-"""Market Analysis Agent - Analyzes market opportunity and competitive landscape."""
+"""Market Analysis Agent - Analyzes market opportunity using LLM."""
 
+import json
 from datetime import datetime
 from typing import Any, Dict, List, Optional
+from uuid import UUID
+
+from pydantic import BaseModel, Field
 
 from app.agents.base import BaseAgent, AgentContext, AgentResult
-from app.domain.enums.enums import AgentName, AgentStatus
+from app.domain.enums.enums import AgentName, AgentStatus, DataAvailability
 from app.core.exceptions.base import AgentError
+from app.infrastructure.ai_models import LLMProviderFactory, LLMConfig, LLMProviderType
+
+
+class TAMAnalysis(BaseModel):
+    """Total Addressable Market analysis."""
+    score: int = Field(ge=0, le=100)
+    tam_usd: Optional[float] = None
+    tam_formatted: Optional[str] = None
+    cagr: Optional[float] = None
+    methodology: Optional[str] = None
+    key_drivers: List[str] = []
+    details: List[str] = []
+    metrics: Dict[str, Any] = {}
+
+
+class SAMAnalysis(BaseModel):
+    """Serviceable Addressable Market analysis."""
+    score: int = Field(ge=0, le=100)
+    sam_usd: Optional[float] = None
+    sam_formatted: Optional[str] = None
+    sam_tam_ratio: Optional[float] = None
+    methodology: Optional[str] = None
+    details: List[str] = []
+    metrics: Dict[str, Any] = {}
+
+
+class SOMAnalysis(BaseModel):
+    """Serviceable Obtainable Market analysis."""
+    score: int = Field(ge=0, le=100)
+    som_usd: Optional[float] = None
+    som_formatted: Optional[str] = None
+    projected_market_share: Optional[float] = None
+    current_revenue: Optional[float] = None
+    implied_growth: Optional[float] = None
+    details: List[str] = []
+    metrics: Dict[str, Any] = {}
+
+
+class CompetitiveAnalysis(BaseModel):
+    """Competitive landscape analysis."""
+    score: int = Field(ge=0, le=100)
+    total_competitors: Optional[int] = None
+    direct_competitors: Optional[int] = None
+    indirect_competitors: Optional[int] = None
+    public_competitors: Optional[int] = None
+    private_competitors: Optional[int] = None
+    intensity: Optional[str] = None
+    moat_strength: Optional[str] = None
+    key_competitors: List[Dict[str, Any]] = []
+    market_structure: Optional[str] = None
+    details: List[str] = []
+    metrics: Dict[str, Any] = {}
+
+
+class TrendsAnalysis(BaseModel):
+    """Market trends and timing analysis."""
+    score: int = Field(ge=0, le=100)
+    lifecycle: Optional[str] = None
+    cagr: Optional[float] = None
+    tailwinds: List[str] = []
+    headwinds: List[str] = []
+    net_sentiment: Optional[str] = None
+    timing_assessment: Optional[str] = None
+    details: List[str] = []
+    metrics: Dict[str, Any] = {}
+
+
+class PositioningAnalysis(BaseModel):
+    """Positioning and differentiation analysis."""
+    score: int = Field(ge=0, le=100)
+    differentiation: Optional[str] = None
+    value_proposition: Optional[str] = None
+    switching_costs: Optional[str] = None
+    network_effects: Optional[bool] = None
+    brand_strength: Optional[str] = None
+    advantages: List[str] = []
+    positioning_statement: Optional[str] = None
+    details: List[str] = []
+    metrics: Dict[str, Any] = {}
+
+
+class MarketAnalysisOutput(BaseModel):
+    """Structured output for market analysis."""
+    overall_score: int = Field(ge=0, le=100)
+    confidence: float = Field(ge=0, le=1)
+    tam_analysis: TAMAnalysis
+    sam_analysis: SAMAnalysis
+    som_analysis: SOMAnalysis
+    competitive_analysis: CompetitiveAnalysis
+    trends_analysis: TrendsAnalysis
+    positioning_analysis: PositioningAnalysis
+    market_opportunity_summary: str
+    key_risks: List[str]
+    key_opportunities: List[str]
+    reasoning: str
 
 
 class MarketAnalysisAgent(BaseAgent[Dict[str, Any], Dict[str, Any]]):
-    """Agent that analyzes market opportunity, TAM/SAM/SOM, and competitive positioning."""
-    
+    """Agent that analyzes market opportunity using LLM."""
+
     def __init__(self):
         super().__init__(
             name=AgentName.MARKET,
-            description="Analyzes market size, growth, competition, and positioning",
-            version="1.0.0",
+            description="Analyzes market size, growth, competition, and positioning using LLM",
+            version="2.0.0",
             max_retries=2,
             timeout_seconds=180,
         )
-    
+        self._llm_provider = None
+
     @property
     def system_prompt(self) -> str:
         return """You are a market research analyst specializing in TAM/SAM/SOM analysis and competitive positioning for IPO candidates.
@@ -69,8 +169,10 @@ OUTPUT FORMAT:
 - Competitive map with key players
 - Positioning assessment
 - Score (0-100) with confidence
-- Key risks and opportunities"""
-    
+- Key risks and opportunities
+
+CRITICAL: Use ONLY the supplied verified data. If information is unavailable, return null/Not Available. Do NOT infer or fabricate factual values. Distinguish clearly between verified facts and your analytical interpretation."""
+
     @property
     def available_tools(self) -> List[str]:
         return [
@@ -83,89 +185,98 @@ OUTPUT FORMAT:
             "assess_barriers_to_entry",
             "evaluate_positioning",
         ]
-    
+
+    def _get_llm_provider(self):
+        if self._llm_provider is None:
+            self._llm_provider = LLMProviderFactory.create_from_env()
+        return self._llm_provider
+
     async def execute(
         self,
         context: AgentContext,
         input_data: Dict[str, Any],
     ) -> AgentResult[Dict[str, Any]]:
-        """Execute market analysis."""
         start_time = datetime.utcnow()
-        
+
         try:
             company_profile = input_data.get("company_profile", {})
             industry_data = input_data.get("industry_data", {})
             competitor_data = input_data.get("competitors", [])
             financials = input_data.get("financials", [])
-            
-            # Extract key info
-            sector = company_profile.get("sector", "")
-            industry = company_profile.get("industry", "")
-            business_model = company_profile.get("business_model", "")
-            target_markets = company_profile.get("target_markets", [])
-            key_products = company_profile.get("key_products", [])
-            competitive_advantages = company_profile.get("competitive_advantages", [])
-            
-            # Perform analyses
-            tam_analysis = self._estimate_tam(sector, industry, target_markets, industry_data)
-            sam_analysis = self._estimate_sam(tam_analysis, company_profile, business_model)
-            som_analysis = self._estimate_som(sam_analysis, company_profile, financials)
-            competitive_analysis = self._analyze_competitive_landscape(
-                competitor_data, company_profile
-            )
-            trends_analysis = self._analyze_market_trends(sector, industry, industry_data)
-            positioning_analysis = self._evaluate_positioning(
-                company_profile, competitive_analysis, competitive_advantages
+
+            # Check for critical missing data
+            if not company_profile or not company_profile.get("common_name"):
+                return AgentResult(
+                    agent_name=self.name,
+                    status=AgentStatus.INSUFFICIENT_DATA,
+                    error="No company profile data provided",
+                    error_type="INSUFFICIENT_DATA",
+                    data={"data_quality": "none", "reason": "Missing company profile"},
+                )
+
+            # Check if industry data is available (not just NOT_AVAILABLE)
+            market_cagr = industry_data.get("market_cagr")
+            lifecycle = industry_data.get("lifecycle")
+            industry_unavailable = (
+                market_cagr in (None, "Not Available", DataAvailability.NOT_AVAILABLE.value) and
+                lifecycle in (None, "Not Available", DataAvailability.NOT_AVAILABLE.value)
             )
             
-            # Calculate scores
-            scores = {
-                "tam_attractiveness": tam_analysis["score"],
-                "sam_capture_potential": sam_analysis["score"],
-                "som_realism": som_analysis["score"],
-                "competitive_position": competitive_analysis["score"],
-                "market_timing": trends_analysis["score"],
-                "differentiation": positioning_analysis["score"],
-            }
-            
-            overall_score = sum(scores.values()) / len(scores)
-            confidence = self._calculate_confidence(
-                industry_data, competitor_data, company_profile
+            if industry_unavailable and not competitor_data:
+                return AgentResult(
+                    agent_name=self.name,
+                    status=AgentStatus.INSUFFICIENT_DATA,
+                    error="No market/industry data or competitor data provided",
+                    error_type="INSUFFICIENT_DATA",
+                    data={"data_quality": "insufficient", "reason": "Missing industry data and competitors"},
+                )
+
+            # Get LLM provider
+            provider = self._get_llm_provider()
+            await provider.initialize()
+
+            # Prepare data summary for LLM
+            market_summary = self._prepare_market_summary(
+                company_profile, industry_data, competitor_data, financials
             )
-            
-            result_data = {
-                "overall_score": round(overall_score, 1),
-                "confidence": confidence,
-                "pillar_scores": scores,
-                "tam_analysis": tam_analysis,
-                "sam_analysis": sam_analysis,
-                "som_analysis": som_analysis,
-                "competitive_analysis": competitive_analysis,
-                "trends_analysis": trends_analysis,
-                "positioning_analysis": positioning_analysis,
-                "market_opportunity_summary": self._generate_opportunity_summary(
-                    tam_analysis, sam_analysis, som_analysis
-                ),
-                "key_risks": self._identify_market_risks(
-                    competitive_analysis, trends_analysis, positioning_analysis
-                ),
-                "key_opportunities": self._identify_market_opportunities(
-                    tam_analysis, trends_analysis, positioning_analysis
-                ),
-            }
-            
+
+            # Create prompt
+            prompt = self._create_analysis_prompt(market_summary)
+
+            # Call LLM
+            response = await provider.complete(
+                prompt=prompt,
+                system_prompt=self.system_prompt,
+                temperature=0.1,
+                max_tokens=4000,
+                response_model=MarketAnalysisOutput,
+            )
+
+            # Parse response
+            if isinstance(response.content, str):
+                try:
+                    analysis_data = json.loads(response.content)
+                except json.JSONDecodeError:
+                    analysis_data = self._extract_json(response.content)
+            else:
+                analysis_data = response.content
+
+            analysis = MarketAnalysisOutput(**analysis_data)
+
             duration = (datetime.utcnow() - start_time).total_seconds() * 1000
-            
+
             return AgentResult(
                 agent_name=self.name,
                 status=AgentStatus.COMPLETED,
-                data=result_data,
-                confidence=confidence,
-                reasoning=self._generate_reasoning(result_data),
-                evidence=self._collect_evidence(result_data),
+                data=analysis.model_dump(),
+                confidence=analysis.confidence,
+                reasoning=analysis.reasoning,
+                evidence=self._collect_evidence(market_summary),
                 duration_ms=duration,
+                tokens_used=response.tokens_used,
+                cost_usd=response.cost_usd,
             )
-            
+
         except Exception as e:
             duration = (datetime.utcnow() - start_time).total_seconds() * 1000
             return AgentResult(
@@ -175,506 +286,108 @@ OUTPUT FORMAT:
                 error_type=type(e).__name__,
                 duration_ms=duration,
             )
-    
-    def _estimate_tam(
+
+    def _prepare_market_summary(
         self,
-        sector: str,
-        industry: str,
-        target_markets: List[str],
+        company_profile: Dict,
         industry_data: Dict,
+        competitor_data: List,
+        financials: List,
     ) -> Dict[str, Any]:
-        """Estimate Total Addressable Market."""
-        # In production, this would query market research databases
-        # For now, use industry benchmarks
+        """Prepare verified market data for LLM."""
         
-        tam_estimates = {
-            "software": 500_000_000_000,
-            "biotech": 200_000_000_000,
-            "fintech": 300_000_000_000,
-            "ai_ml": 150_000_000_000,
-            "cybersecurity": 200_000_000_000,
-            "semiconductors": 600_000_000_000,
-            "renewable_energy": 1_000_000_000_000,
-            "healthcare_services": 8_000_000_000_000,
-            "ecommerce": 6_000_000_000_000,
-        }
+        def safe_get(d: Dict, key: str, default="Not Available"):
+            return d.get(key, default)
         
-        tam = tam_estimates.get(industry.lower(), 100_000_000_000)
-        
-        # Adjust for target markets
-        if "global" in [m.lower() for m in target_markets]:
-            pass  # Already global
-        elif len(target_markets) == 1:
-            tam *= 0.3  # Single geography
-        elif len(target_markets) <= 3:
-            tam *= 0.6
-        
-        # Get growth rate
-        cagr = industry_data.get("market_cagr", 0.15)
-        
-        score = 50
-        if tam > 1_000_000_000_000:
-            score += 25
-        elif tam > 500_000_000_000:
-            score += 15
-        elif tam > 100_000_000_000:
-            score += 10
-        
-        if cagr > 0.25:
-            score += 15
-        elif cagr > 0.15:
-            score += 10
-        elif cagr > 0.1:
-            score += 5
-        
-        return {
-            "tam_usd": tam,
-            "tam_formatted": f"${tam/1e9:.1f}B",
-            "cagr": cagr,
-            "methodology": "Industry benchmarks adjusted for target markets",
-            "key_drivers": industry_data.get("key_drivers", []),
-            "score": min(100, max(0, score)),
-        }
-    
-    def _estimate_sam(
-        self,
-        tam_analysis: Dict,
-        company_profile: Dict,
-        business_model: str,
-    ) -> Dict[str, Any]:
-        """Estimate Serviceable Addressable Market."""
-        tam = tam_analysis["tam_usd"]
-        
-        # SAM is typically 10-30% of TAM for focused companies
-        # Higher for platform/horizontal plays, lower for niche
-        sam_pct = 0.15
-        
-        if "platform" in business_model.lower():
-            sam_pct = 0.25
-        elif "vertical" in business_model.lower() or "niche" in business_model.lower():
-            sam_pct = 0.08
-        elif "horizontal" in business_model.lower():
-            sam_pct = 0.30
-        
-        sam = tam * sam_pct
-        
-        # Adjust for company stage
-        stage = company_profile.get("stage", "growth")
-        if stage == "early":
-            sam *= 0.7
-        elif stage == "mature":
-            sam *= 1.2
-        
-        score = 50
-        if sam > 10_000_000_000:
-            score += 20
-        elif sam > 1_000_000_000:
-            score += 15
-        elif sam > 100_000_000:
-            score += 10
-        
-        # SAM/TAM ratio - too high might be unrealistic
-        sam_tam_ratio = sam / tam
-        if sam_tam_ratio > 0.5:
-            score -= 10
-        
-        return {
-            "sam_usd": sam,
-            "sam_formatted": f"${sam/1e9:.1f}B",
-            "sam_tam_ratio": sam_tam_ratio,
-            "methodology": f"Applied {sam_pct:.0%} SAM/TAM ratio based on business model",
-            "score": min(100, max(0, score)),
-        }
-    
-    def _estimate_som(
-        self,
-        sam_analysis: Dict,
-        company_profile: Dict,
-        financials: List[Dict],
-    ) -> Dict[str, Any]:
-        """Estimate Serviceable Obtainable Market."""
-        sam = sam_analysis["sam_usd"]
-        
-        # SOM typically 1-5% of SAM for realistic 3-5 year capture
-        # Adjust based on current traction
-        current_revenue = 0
-        if financials:
-            current_revenue = financials[0].get("revenue", 0)
-        
-        if current_revenue > 0:
-            # Implied current market share
-            current_share = current_revenue / sam
-            # Project 3-5 year capture
-            projected_share = min(current_share * 5, 0.05)  # Cap at 5%
-        else:
-            projected_share = 0.01  # 1% default
-        
-        som = sam * projected_share
-        
-        score = 50
-        if projected_share > 0.03:
-            score += 15
-        elif projected_share > 0.01:
-            score += 10
-        elif projected_share > 0.005:
-            score += 5
-        
-        # Check realism
-        if som > 1_000_000_000 and current_revenue < 10_000_000:
-            score -= 15  # Unrealistic jump
-        
-        return {
-            "som_usd": som,
-            "som_formatted": f"${som/1e6:.0f}M" if som < 1e9 else f"${som/1e9:.1f}B",
-            "projected_market_share": projected_share,
-            "current_revenue": current_revenue,
-            "implied_growth": (som / current_revenue - 1) if current_revenue > 0 else None,
-            "score": min(100, max(0, score)),
-        }
-    
-    def _analyze_competitive_landscape(
-        self,
-        competitor_data: List[Dict],
-        company_profile: Dict,
-    ) -> Dict[str, Any]:
-        """Analyze competitive positioning."""
-        if not competitor_data:
-            return {
-                "score": 50,
-                "details": "No competitor data available",
-                "competitors": [],
-                "market_structure": "unknown",
-            }
-        
-        # Categorize competitors
-        direct = [c for c in competitor_data if c.get("type") == "direct"]
-        indirect = [c for c in competitor_data if c.get("type") == "indirect"]
-        public = [c for c in competitor_data if c.get("public", False)]
-        private = [c for c in competitor_data if not c.get("public", False)]
-        
-        # Market concentration
-        total_competitors = len(competitor_data)
-        public_count = len(public)
-        
-        # Competitive intensity
-        intensity = "low"
-        if total_competitors > 20:
-            intensity = "very_high"
-        elif total_competitors > 10:
-            intensity = "high"
-        elif total_competitors > 5:
-            intensity = "moderate"
-        
-        # Assess moat
-        advantages = company_profile.get("competitive_advantages", [])
-        moat_strength = "weak"
-        if len(advantages) >= 3:
-            moat_strength = "strong"
-        elif len(advantages) >= 1:
-            moat_strength = "moderate"
-        
-        score = 50
-        if intensity == "low":
-            score += 15
-        elif intensity == "moderate":
-            score += 5
-        elif intensity == "high":
-            score -= 5
-        else:
-            score -= 15
-        
-        if moat_strength == "strong":
-            score += 20
-        elif moat_strength == "moderate":
-            score += 10
-        
-        return {
-            "score": min(100, max(0, score)),
-            "total_competitors": total_competitors,
-            "direct_competitors": len(direct),
-            "indirect_competitors": len(indirect),
-            "public_competitors": public_count,
-            "private_competitors": len(private),
-            "intensity": intensity,
-            "moat_strength": moat_strength,
-            "key_competitors": [
+        summary = {
+            "company_name": safe_get(company_profile, "common_name", "Unknown"),
+            "symbol": safe_get(company_profile, "ticker", "N/A"),
+            "sector": safe_get(company_profile, "sector", "Unknown"),
+            "industry": safe_get(company_profile, "industry", "Unknown"),
+            "business_model": safe_get(company_profile, "business_model", "Not Available"),
+            "target_markets": safe_get(company_profile, "target_markets", []),
+            "key_products": safe_get(company_profile, "key_products", []),
+            "competitive_advantages": safe_get(company_profile, "competitive_advantages", []),
+            "differentiation": safe_get(company_profile, "differentiation", "Not Available"),
+            "value_proposition": safe_get(company_profile, "value_proposition", "Not Available"),
+            "switching_costs": safe_get(company_profile, "switching_costs", "Not Available"),
+            "network_effects": safe_get(company_profile, "network_effects", False),
+            "brand_strength": safe_get(company_profile, "brand_strength", "Not Available"),
+            "tam": safe_get(company_profile, "tam", "Not Available"),
+            "industry_data": {
+                "market_cagr": safe_get(industry_data, "market_cagr", "Not Available"),
+                "lifecycle": safe_get(industry_data, "lifecycle", "Not Available"),
+                "tailwinds": safe_get(industry_data, "tailwinds", []),
+                "headwinds": safe_get(industry_data, "headwinds", []),
+            },
+            "competitors": [
                 {
                     "name": c.get("name"),
                     "public": c.get("public", False),
                     "estimated_revenue": c.get("revenue"),
                     "differentiation": c.get("differentiation"),
+                    "type": c.get("type", "unknown"),
                 }
                 for c in competitor_data[:10]
             ],
-            "market_structure": "fragmented" if total_competitors > 10 else "concentrated",
+            "financials": financials[0] if financials else {},
         }
-    
-    def _analyze_market_trends(
-        self,
-        sector: str,
-        industry: str,
-        industry_data: Dict,
-    ) -> Dict[str, Any]:
-        """Analyze market trends and timing."""
-        tailwinds = industry_data.get("tailwinds", [])
-        headwinds = industry_data.get("headwinds", [])
-        cagr = industry_data.get("market_cagr", 0.15)
-        lifecycle = industry_data.get("lifecycle", "growth")
-        
-        score = 50
-        
-        # Lifecycle
-        if lifecycle == "emerging":
-            score += 15
-        elif lifecycle == "growth":
-            score += 10
-        elif lifecycle == "mature":
-            score -= 5
-        elif lifecycle == "declining":
-            score -= 20
-        
-        # Tailwinds vs headwinds
-        net_tailwinds = len(tailwinds) - len(headwinds)
-        score += net_tailwinds * 5
-        
-        # CAGR
-        if cagr > 0.25:
-            score += 15
-        elif cagr > 0.15:
-            score += 10
-        elif cagr > 0.1:
-            score += 5
-        elif cagr < 0:
-            score -= 15
-        
-        return {
-            "score": min(100, max(0, score)),
-            "lifecycle": lifecycle,
-            "cagr": cagr,
-            "tailwinds": tailwinds,
-            "headwinds": headwinds,
-            "net_sentiment": "positive" if net_tailwinds > 0 else "negative",
-            "timing_assessment": self._assess_timing(lifecycle, cagr, net_tailwinds),
-        }
-    
-    def _assess_timing(self, lifecycle: str, cagr: float, net_tailwinds: int) -> str:
-        """Assess market entry timing."""
-        if lifecycle in ["emerging", "growth"] and cagr > 0.15 and net_tailwinds > 0:
-            return "excellent"
-        elif lifecycle == "growth" and cagr > 0.1:
-            return "good"
-        elif lifecycle == "mature" and cagr > 0.05:
-            return "fair"
-        else:
-            return "challenging"
-    
-    def _evaluate_positioning(
-        self,
-        company_profile: Dict,
-        competitive_analysis: Dict,
-        advantages: List[str],
-    ) -> Dict[str, Any]:
-        """Evaluate competitive positioning."""
-        differentiation = company_profile.get("differentiation", "")
-        value_prop = company_profile.get("value_proposition", "")
-        switching_costs = company_profile.get("switching_costs", "medium")
-        network_effects = company_profile.get("network_effects", False)
-        brand_strength = company_profile.get("brand_strength", "building")
-        
-        score = 50
-        
-        # Differentiation clarity
-        if differentiation and len(differentiation) > 100:
-            score += 10
-        elif differentiation:
-            score += 5
-        
-        # Switching costs
-        if switching_costs == "high":
-            score += 15
-        elif switching_costs == "medium":
-            score += 5
-        elif switching_costs == "low":
-            score -= 5
-        
-        # Network effects
-        if network_effects:
-            score += 15
-        
-        # Brand
-        if brand_strength == "strong":
-            score += 10
-        elif brand_strength == "established":
-            score += 5
-        
-        # Competitive advantages count
-        score += min(15, len(advantages) * 3)
-        
-        return {
-            "score": min(100, max(0, score)),
-            "differentiation": differentiation,
-            "value_proposition": value_prop,
-            "switching_costs": switching_costs,
-            "network_effects": network_effects,
-            "brand_strength": brand_strength,
-            "advantages": advantages,
-            "positioning_statement": self._generate_positioning_statement(
-                company_profile, competitive_analysis
-            ),
-        }
-    
-    def _generate_positioning_statement(
-        self,
-        company_profile: Dict,
-        competitive_analysis: Dict,
-    ) -> str:
-        """Generate positioning statement."""
-        name = company_profile.get("common_name", "The Company")
-        industry = company_profile.get("industry", "its market")
-        differentiation = company_profile.get("differentiation", "unique approach")
-        
-        return (
-            f"{name} is positioned as a {differentiation} player in {industry}. "
-            f"With {competitive_analysis.get('direct_competitors', 0)} direct competitors "
-            f"and a {competitive_analysis.get('moat_strength', 'moderate')} moat, "
-            f"the company targets {company_profile.get('target_customer', 'enterprise customers')}."
-        )
-    
-    def _generate_opportunity_summary(
-        self,
-        tam: Dict,
-        sam: Dict,
-        som: Dict,
-    ) -> str:
-        """Generate market opportunity summary."""
-        return (
-            f"Market Opportunity: TAM of {tam['tam_formatted']} "
-            f"({tam['cagr']:.0%} CAGR), SAM of {sam['sam_formatted']}, "
-            f"with realistic SOM of {som['som_formatted']} "
-            f"({som['projected_market_share']:.1%} market share)."
-        )
-    
-    def _identify_market_risks(
-        self,
-        competitive: Dict,
-        trends: Dict,
-        positioning: Dict,
-    ) -> List[str]:
-        """Identify market risks."""
-        risks = []
-        
-        if competitive.get("intensity") in ["high", "very_high"]:
-            risks.append("High competitive intensity may pressure margins")
-        
-        if competitive.get("moat_strength") == "weak":
-            risks.append("Weak competitive moat vulnerable to disruption")
-        
-        if trends.get("lifecycle") == "mature":
-            risks.append("Market maturity limits growth potential")
-        
-        if trends.get("headwinds"):
-            risks.append(f"Headwinds: {', '.join(trends['headwinds'][:3])}")
-        
-        if positioning.get("switching_costs") == "low":
-            risks.append("Low switching costs enable customer churn")
-        
-        return risks
-    
-    def _identify_market_opportunities(
-        self,
-        tam: Dict,
-        trends: Dict,
-        positioning: Dict,
-    ) -> List[str]:
-        """Identify market opportunities."""
-        opps = []
-        
-        if tam.get("tam_usd", 0) > 1e12:
-            opps.append("Massive TAM with room for multiple winners")
-        
-        if trends.get("tailwinds"):
-            opps.append(f"Strong tailwinds: {', '.join(trends['tailwinds'][:3])}")
-        
-        if positioning.get("network_effects"):
-            opps.append("Network effects create winner-take-most dynamics")
-        
-        if positioning.get("switching_costs") == "high":
-            opps.append("High switching costs drive retention and expansion")
-        
-        return opps
-    
-    def _calculate_confidence(
-        self,
-        industry_data: Dict,
-        competitor_data: List,
-        company_profile: Dict,
-    ) -> float:
-        """Calculate confidence in analysis."""
-        confidence = 0.4
-        
-        if industry_data.get("market_cagr") is not None:
-            confidence += 0.15
-        if industry_data.get("tailwinds"):
-            confidence += 0.1
-        if len(competitor_data) >= 5:
-            confidence += 0.15
-        elif len(competitor_data) > 0:
-            confidence += 0.1
-        if company_profile.get("competitive_advantages"):
-            confidence += 0.1
-        if company_profile.get("tam"):
-            confidence += 0.1
-        
-        return min(1.0, confidence)
-    
-    def _generate_reasoning(self, result: Dict) -> str:
-        """Generate reasoning summary."""
-        parts = [
-            f"Market Analysis Score: {result['overall_score']:.1f}/100",
-            f"Confidence: {result['confidence']:.0%}",
-            "",
-            "Pillar Scores:",
-        ]
-        
-        for pillar, score in result["pillar_scores"].items():
-            parts.append(f"  - {pillar.replace('_', ' ').title()}: {score:.1f}")
-        
-        parts.append(f"\n{result['market_opportunity_summary']}")
-        
-        if result["key_opportunities"]:
-            parts.append("\nOpportunities:")
-            for o in result["key_opportunities"]:
-                parts.append(f"  + {o}")
-        
-        if result["key_risks"]:
-            parts.append("\nRisks:")
-            for r in result["key_risks"]:
-                parts.append(f"  - {r}")
-        
-        return "\n".join(parts)
-    
-    def _collect_evidence(self, result: Dict) -> List[str]:
-        """Collect evidence citations."""
+        return summary
+
+    def _create_analysis_prompt(self, summary: Dict) -> str:
+        """Create the analysis prompt for the LLM."""
+        prompt = f"""Analyze the market opportunity for the following IPO candidate using ONLY the verified data provided below.
+
+COMPANY: {summary['company_name']}
+Sector: {summary['sector']}
+Industry: {summary['industry']}
+Business Model: {summary['business_model']}
+Target Markets: {', '.join(summary['target_markets']) if summary['target_markets'] else 'Not Available'}
+Key Products: {', '.join(summary['key_products']) if summary['key_products'] else 'Not Available'}
+Competitive Advantages: {', '.join(summary['competitive_advantages']) if summary['competitive_advantages'] else 'Not Available'}
+
+DIFFERENTIATION & POSITIONING:
+- Differentiation: {summary['differentiation']}
+- Value Proposition: {summary['value_proposition']}
+- Switching Costs: {summary['switching_costs']}
+- Network Effects: {summary['network_effects']}
+- Brand Strength: {summary['brand_strength']}
+
+COMPETITIVE LANDSCAPE:
+{json.dumps(summary['competitors'], indent=2)}
+
+INDUSTRY DATA:
+- Market CAGR: {summary['industry_data'].get('market_cagr', 'Not Available')}
+- Lifecycle Stage: {summary['industry_data'].get('lifecycle', 'Not Available')}
+- Tailwinds: {', '.join(summary['industry_data'].get('tailwinds', [])) if summary['industry_data'].get('tailwinds') else 'Not Available'}
+- Headwinds: {', '.join(summary['industry_data'].get('headwinds', [])) if summary['industry_data'].get('headwinds') else 'Not Available'}
+
+TAM (if provided): {summary.get('tam', 'Not Available')}
+
+REMEMBER: Use ONLY the data above. If a value says "Not Available", do not guess or infer it. Return null for unavailable data. Distinguish clearly between VERIFIED FACTS (from data above) and YOUR ANALYSIS/INTERPRETATION."""
+        return prompt
+
+    def _extract_json(self, content: str) -> Dict:
+        """Extract JSON from LLM response."""
+        start = content.find('{')
+        end = content.rfind('}') + 1
+        if start >= 0 and end > start:
+            try:
+                return json.loads(content[start:end])
+            except json.JSONDecodeError:
+                pass
+        raise ValueError("Could not extract valid JSON from response")
+
+    def _collect_evidence(self, summary: Dict) -> List[str]:
         evidence = []
-        
-        tam = result.get("tam_analysis", {})
-        if tam.get("tam_usd"):
-            evidence.append(f"TAM: {tam['tam_formatted']} ({tam['cagr']:.0%} CAGR)")
-        
-        sam = result.get("sam_analysis", {})
-        if sam.get("sam_usd"):
-            evidence.append(f"SAM: {sam['sam_formatted']} ({sam['sam_tam_ratio']:.0%} of TAM)")
-        
-        som = result.get("som_analysis", {})
-        if som.get("som_usd"):
-            evidence.append(f"SOM: {som['som_formatted']} ({som['projected_market_share']:.1%} share)")
-        
-        comp = result.get("competitive_analysis", {})
-        if comp.get("total_competitors"):
-            evidence.append(f"Competitors: {comp['total_competitors']} total ({comp['direct_competitors']} direct)")
-        
-        trends = result.get("trends_analysis", {})
-        if trends.get("lifecycle"):
-            evidence.append(f"Market lifecycle: {trends['lifecycle']} ({trends['cagr']:.0%} CAGR)")
-        
+        if summary.get("tam") != "Not Available":
+            evidence.append(f"TAM: {summary['tam']}")
+        if summary['industry_data'].get('market_cagr') != "Not Available":
+            evidence.append(f"Market CAGR: {summary['industry_data']['market_cagr']}")
+        if summary['industry_data'].get('lifecycle') != "Not Available":
+            evidence.append(f"Lifecycle: {summary['industry_data']['lifecycle']}")
+        if summary['industry_data'].get('tailwinds'):
+            evidence.append(f"Tailwinds: {', '.join(summary['industry_data']['tailwinds'][:3])}")
+        if summary['competitors']:
+            evidence.append(f"Competitors analyzed: {len(summary['competitors'])}")
         return evidence

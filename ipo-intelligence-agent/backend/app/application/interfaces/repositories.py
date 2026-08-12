@@ -24,6 +24,7 @@ from app.domain.entities.entities import (
     BestPracticeMemory,
     ReflectionMemory,
     Lesson,
+    OverallAnalysis,
 )
 from app.domain.enums.enums import (
     AgentName,
@@ -197,6 +198,20 @@ class AnalysisRepository(IORepository):
     @abstractmethod
     async def get_latest_analysis(self, symbol: str) -> Optional[Dict[str, Any]]:
         """Get latest analysis for symbol."""
+        pass
+    
+    @abstractmethod
+    async def get_running_analysis(self, symbol: str) -> Optional[OverallAnalysis]:
+        """Get currently running analysis for symbol."""
+        pass
+    
+    @abstractmethod
+    async def get_recent_completed_analysis(
+        self,
+        symbol: str,
+        hours: int = 1,
+    ) -> Optional[OverallAnalysis]:
+        """Get recently completed analysis for symbol within specified hours."""
         pass
     
     @abstractmethod
@@ -593,7 +608,7 @@ class LessonRepository(IORepository):
     async def list_all(self, limit: int = 100) -> List[Lesson]:
         """List all lessons (newest first)."""
         pass
-
+    
     @abstractmethod
     async def save(self, lesson: Lesson) -> UUID:
         """Save lesson."""
@@ -630,6 +645,70 @@ class LessonRepository(IORepository):
         limit: int = 20,
     ) -> List[Lesson]:
         """Search lessons by text."""
+        pass
+
+
+class ChatRepository(IORepository):
+    """Chat conversation repository."""
+    
+    @abstractmethod
+    async def create_conversation(
+        self,
+        title: str,
+        ipo_symbol: Optional[str] = None,
+        user_id: Optional[str] = None,
+    ) -> UUID:
+        """Create a new conversation."""
+        pass
+    
+    @abstractmethod
+    async def get_conversation(self, conversation_id: UUID) -> Optional[Dict[str, Any]]:
+        """Get conversation by ID."""
+        pass
+    
+    @abstractmethod
+    async def list_conversations(
+        self,
+        limit: int = 20,
+        offset: int = 0,
+        user_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List conversations."""
+        pass
+    
+    @abstractmethod
+    async def update_conversation(
+        self,
+        conversation_id: UUID,
+        title: Optional[str] = None,
+        updated_at: Optional[datetime] = None,
+    ) -> bool:
+        """Update conversation."""
+        pass
+    
+    @abstractmethod
+    async def delete_conversation(self, conversation_id: UUID) -> bool:
+        """Delete conversation."""
+        pass
+    
+    @abstractmethod
+    async def add_message(self, message: Dict[str, Any]) -> UUID:
+        """Add message to conversation."""
+        pass
+    
+    @abstractmethod
+    async def get_messages(
+        self,
+        conversation_id: UUID,
+        limit: int = 50,
+        offset: int = 0,
+    ) -> List[Dict[str, Any]]:
+        """Get messages for a conversation."""
+        pass
+    
+    @abstractmethod
+    async def get_message(self, message_id: UUID) -> Optional[Dict[str, Any]]:
+        """Get message by ID."""
         pass
 
 
